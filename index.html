@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Ночной город</title>
+<meta name="description" content="Бесконечный процедурный ночной город с видом сверху в духе GTA 2">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%230a0d18'/><rect x='3' y='5' width='4' height='9' fill='%23ffcf7a'/><rect x='9' y='2' width='4' height='12' fill='%23ff4fb4'/></svg>">
+<style>
+  :root { --hud: #ffd27a; --pink: #ff4fb4; --cyan: #5ee6ff; --bg: #06080f; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: #e8e8f0;
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas#game { position: fixed; inset: 0; display: block; }
+  .hidden { display: none !important; }
+
+  #minimap { position: fixed; top: 16px; right: 16px; border-radius: 50%; border: 2px solid rgba(255,210,122,0.6);
+    box-shadow: 0 0 18px rgba(255,79,180,0.35), inset 0 0 20px #000; background: #0a0d14; }
+  #district { position: fixed; top: 18px; left: 18px; font-size: 26px; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--hud); text-shadow: 0 0 10px rgba(255,170,60,0.7), 2px 2px 0 #000; }
+  #district.flash { animation: flash 2.4s ease-out; }
+  @keyframes flash { 0% { opacity: 0; transform: translateY(-8px); } 15% { opacity: 1; transform: none; } 100% { opacity: 0.85; } }
+  #speedo { position: fixed; right: 22px; bottom: 18px; text-align: right; }
+  #speed { font-size: 56px; font-weight: 800; line-height: 1; color: #fff; text-shadow: 0 0 14px var(--pink), 3px 3px 0 #000; font-variant-numeric: tabular-nums; }
+  #speedo small { display: block; font-size: 14px; letter-spacing: 0.2em; color: var(--cyan); text-shadow: 0 0 8px var(--cyan); }
+  #odo { font-size: 13px; color: #aab; margin-top: 4px; }
+  #toast { position: fixed; left: 50%; top: 22%; transform: translateX(-50%); font-size: 22px; font-weight: 700;
+    color: #fff; text-shadow: 0 0 12px var(--pink), 2px 2px 0 #000; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+  #stats { position: fixed; left: 18px; top: 56px; font: 12px monospace; color: #8f8; text-shadow: 1px 1px 0 #000; }
+  #hint { position: fixed; left: 18px; bottom: 14px; font-size: 13px; color: #99a; text-shadow: 1px 1px 0 #000; }
+  body.touch #hint { display: none; }
+
+  #help { position: fixed; left: 18px; top: 64px; padding: 14px 18px; background: rgba(8,10,20,0.82);
+    border: 1px solid rgba(255,210,122,0.35); border-radius: 10px; font-size: 14px; line-height: 1.7; }
+  #help b { color: var(--hud); display: inline-block; min-width: 92px; }
+
+  #intro { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column;
+    background: radial-gradient(ellipse at center, rgba(10,12,30,0.55), rgba(3,4,10,0.92)); cursor: pointer; text-align: center; padding: 16px; }
+  #intro h1 { margin: 0; font-size: clamp(38px, 9vw, 92px); letter-spacing: 0.08em; color: #fff;
+    text-shadow: 0 0 18px var(--pink), 0 0 42px var(--pink), 4px 4px 0 #000; }
+  #intro h1 span { color: var(--hud); text-shadow: 0 0 18px #ff9a2a, 0 0 40px #ff9a2a, 4px 4px 0 #000; }
+  #intro p { color: #c8c8d8; font-size: 17px; max-width: 520px; line-height: 1.6; }
+  #intro .go { margin-top: 10px; color: var(--cyan); text-shadow: 0 0 10px var(--cyan); animation: pulse 1.4s infinite; font-size: 18px; letter-spacing: .15em; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  #loading { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--hud); background: var(--bg); }
+
+  #touch { display: none; }
+  body.touch #touch { display: block; }
+  .tb { position: fixed; bottom: 22px; width: 74px; height: 74px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.35);
+    background: rgba(20,24,40,0.45); color: #fff; font-size: 28px; display: flex; align-items: center; justify-content: center; }
+  .tb.on { background: rgba(255,79,180,0.45); border-color: var(--pink); }
+  .tb[data-k=left] { left: 18px; } .tb[data-k=right] { left: 104px; }
+  .tb[data-k=up] { right: 18px; bottom: 112px; } .tb[data-k=down] { right: 104px; }
+  .tb[data-k=hand] { right: 18px; width: 74px; height: 74px; font-size: 14px; }
+  body.touch #speedo { bottom: auto; top: 230px; right: 18px; }
+  body.touch #speed { font-size: 40px; }
+  @media (max-width: 600px) { #district { font-size: 18px; max-width: 50vw; } }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<canvas id="minimap"></canvas>
+<div id="district"></div>
+<div id="speedo"><div id="speed">0</div><small>КМ/Ч</small><div id="odo"></div></div>
+<div id="toast"></div>
+<div id="hint">H — управление · M — звук · R — на дорогу</div>
+<div id="stats" class="hidden"></div>
+<div id="help" class="hidden">
+  <div><b>W / ↑</b> газ</div>
+  <div><b>S / ↓</b> тормоз / задний ход</div>
+  <div><b>A D / ← →</b> руль</div>
+  <div><b>Пробел</b> ручник, дрифт</div>
+  <div><b>E</b> гудок</div>
+  <div><b>R</b> вернуться на дорогу</div>
+  <div><b>M</b> звук вкл/выкл</div>
+</div>
+<div id="touch">
+  <div class="tb" data-k="left">◀</div>
+  <div class="tb" data-k="right">▶</div>
+  <div class="tb" data-k="up">▲</div>
+  <div class="tb" data-k="down">▼</div>
+  <div class="tb" data-k="hand" style="bottom:206px">РУЧН</div>
+</div>
+<div id="intro">
+  <h1>НОЧНОЙ <span>ГОРОД</span></h1>
+  <p>Бесконечный город, который строится прямо перед капотом. Проспекты, диагонали, реки и мосты, парки с прудами, стройки, промзоны, стадионы и спальные районы.</p>
+  <p>WASD / стрелки — ехать, пробел — ручник.</p>
+  <div class="go">НАЖМИТЕ ЛЮБУЮ КЛАВИШУ</div>
+</div>
+<div id="loading">Строим город…</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
