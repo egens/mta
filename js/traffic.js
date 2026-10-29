@@ -74,8 +74,8 @@ function pickSprite(c) {
   c.heavy = false; c.police = false;
   if (r < 0.08) { c.spr = S.trucks[(Math.random() * S.trucks.length) | 0]; c.heavy = true; c.cruise *= 0.8; }
   else if (r < 0.13) { c.spr = S.bus; c.heavy = true; c.cruise *= 0.75; }
-  else if (r < 0.23) c.spr = S.taxi;
-  else if (r < 0.26) { c.spr = S.police; c.police = true; }
+  else if (r < 0.36) c.spr = S.taxi;
+  else if (r < 0.39) { c.spr = S.police; c.police = true; }
   else c.spr = S.cars[(Math.random() * S.cars.length) | 0];
   c.L = c.spr.L; c.W = c.spr.W;
 }

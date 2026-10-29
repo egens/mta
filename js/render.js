@@ -4,7 +4,7 @@ import { CS, peekChunk, buildChunkAt, nextTick } from './chunks.js';
 import { S, drawCarSprite, LIGHT_RGB } from './sprites.js';
 import { hashU } from './util.js';
 
-const AMBIENT = 'rgba(3,5,18,0.87)';
+const AMBIENT = 'rgba(1,2,8,0.93)';
 const LIGHT_SCALE = 0.5;
 
 let lightCv, lightG;
@@ -90,7 +90,7 @@ export function drawFrame(ctx, st) {
   for (const l of lamps) {
     const k = blinkK(l, time) * l.i;
     if (k <= 0) continue;
-    lightG.globalAlpha = Math.min(1, k * 0.95);
+    lightG.globalAlpha = Math.min(1, k * (l.dot ? 0.7 : 0.85));
     lightG.drawImage(S.mask, l.lx - l.r, l.ly - l.r, l.r * 2, l.r * 2);
   }
   // фары
@@ -100,8 +100,8 @@ export function drawFrame(ctx, st) {
     const L = c.spr ? c.spr.L : S.player.L;
     lightG.save();
     lightG.translate(c.x, c.y); lightG.rotate(c.a);
-    lightG.globalAlpha = c === P ? 0.95 : 0.7;
-    const len = c === P ? 300 : 230;
+    lightG.globalAlpha = c === P ? 0.8 : 0.45;
+    const len = c === P ? 280 : 170;
     lightG.drawImage(S.coneMask, L / 2 - 4, -len * 0.36, len, len * 0.72);
     lightG.globalAlpha = 0.5;
     lightG.drawImage(S.mask, -L / 2 - 24, -24, 48, 48);
@@ -132,10 +132,23 @@ export function drawFrame(ctx, st) {
     const k = blinkK(l, time) * l.i;
     if (k <= 0) continue;
     const spr = S.glow[l.c] || S.glow.white;
-    ctx.globalAlpha = Math.min(1, k * (l.c === 'sodium' ? 0.24 : l.c === 'white' ? 0.13 : 0.26));
+    if (l.dot) {
+      // LED-гирлянды на фасадах: яркая точка с ореолом
+      ctx.globalAlpha = 0.5 * k;
+      ctx.drawImage(spr, l.lx - 16, l.ly - 16, 32, 32);
+      ctx.globalAlpha = 1;
+      ctx.drawImage(S.dot[l.c] || S.dot.white, l.lx - 5, l.ly - 5, 10, 10);
+      ctx.drawImage(S.dot.white, l.lx - 2.5, l.ly - 2.5, 5, 5);
+      continue;
+    }
+    ctx.globalAlpha = Math.min(1, k * (l.c === 'sodium' ? 0.2 : l.c === 'white' ? 0.09 : 0.24));
     const rr = l.r * 0.95;
     ctx.drawImage(spr, l.lx - rr, l.ly - rr, rr * 2, rr * 2);
-    if (l.pole) { ctx.globalAlpha = 0.9; ctx.drawImage(S.dot[l.c] || S.dot.white, l.lx - 6, l.ly - 6, 12, 12); }
+    if (l.pole) {
+      ctx.globalAlpha = 1;
+      ctx.drawImage(S.dot[l.c] || S.dot.white, l.lx - 7, l.ly - 7, 14, 14);
+      ctx.drawImage(S.dot.white, l.lx - 3, l.ly - 3, 6, 6);
+    }
   }
   // отражения на воде
   for (const l of lamps) {
@@ -149,8 +162,8 @@ export function drawFrame(ctx, st) {
     const L = c.spr ? c.spr.L : S.player.L;
     const Wc = c.spr ? c.spr.W : S.player.W;
     ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.a);
-    ctx.globalAlpha = c === P ? 0.22 : 0.15;
-    const len = c === P ? 300 : 230;
+    ctx.globalAlpha = c === P ? 0.12 : 0.06;
+    const len = c === P ? 280 : 170;
     ctx.drawImage(S.coneGlow, L / 2 - 4, -len * 0.36, len, len * 0.72);
     ctx.globalAlpha = 1;
     for (const s of [-1, 1]) ctx.drawImage(S.dot.white, L / 2 - 8, s * (Wc / 2 - 4) - 8, 16, 16);
@@ -173,6 +186,7 @@ export function drawFrame(ctx, st) {
     ctx.drawImage(spr, p.x - p.s, p.y - p.s, p.s * 2, p.s * 2);
   }
   // светофоры
+  drawCrosswalks(ctx, v);
   drawSignals(ctx, st, v, time);
   for (const t of st.trains) {
     ctx.globalAlpha = 1;
@@ -210,6 +224,21 @@ function neighbourChunks(v) {
 function blinkK(l, t) {
   if (!l.blink) return 1;
   return Math.sin(t * 4 + l.x * 0.1) > 0.2 ? 1 : 0.1;
+}
+
+// ---------------------------------------------------------------- светящиеся зебры
+function drawCrosswalks(ctx, v) {
+  const i0 = W.colAt(v.x0), i1 = W.colAt(v.x1) + 1, j0 = W.rowAt(v.y0), j1 = W.rowAt(v.y1) + 1;
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.beginPath();
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+    const x = W.roadX(i), y = W.roadY(j);
+    if (W.riverDist(x, y) < 60) continue;
+    const hw = W.widthX(i) / 2, hh = W.widthY(j) / 2;
+    for (let u = -hw + 5; u < hw - 8; u += 11) { ctx.rect(x + u, y - hh - 22, 6, 18); ctx.rect(x + u, y + hh + 4, 6, 18); }
+    for (let u = -hh + 5; u < hh - 8; u += 11) { ctx.rect(x - hw - 22, y + u, 18, 6); ctx.rect(x + hw + 4, y + u, 18, 6); }
+  }
+  ctx.fill();
 }
 
 // ---------------------------------------------------------------- светофоры
@@ -329,7 +358,8 @@ function drawBuildings(ctx, st, v) {
       ctx.moveTo(B[k][0], B[k][1]); ctx.lineTo(B[k2][0], B[k2][1]); ctx.lineTo(R[k2][0], R[k2][1]); ctx.lineTo(R[k][0], R[k][1]);
       ctx.closePath(); ctx.fill();
       // лёгкая подсветка граней с одной стороны
-      if (k === 1 || k === 2) { ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fill(); }
+      if (k === 1 || k === 2) { ctx.fillStyle = 'rgba(255,255,255,0.025)'; ctx.fill(); }
+      if (b.glass) { drawGlassFace(ctx, B[k], B[k2], R[k], R[k2], b, k); continue; }
       if (b.lit > 0) addWindows(winPaths, B[k], B[k2], R[k], R[k2], b, k, time);
     }
     flushWindows(ctx, winPaths);
@@ -338,7 +368,7 @@ function drawBuildings(ctx, st, v) {
     ctx.beginPath();
     ctx.moveTo(R[0][0], R[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(R[k][0], R[k][1]); ctx.closePath();
     ctx.fillStyle = b.roof; ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.strokeStyle = b.glass ? GLASS[b.glass][1] : 'rgba(255,255,255,0.06)'; ctx.lineWidth = b.glass ? 1.6 : 1; ctx.stroke();
     const zf = z * f;
     ctx.setTransform(zf, 0, 0, zf, cx - cam.x * zf, cy - cam.y * zf);
     if (b.gable) drawGable(ctx, b);
@@ -382,12 +412,12 @@ function addWindows(paths, b0, b1, r0, r1, b, face, time) {
   if (wpx / cols < 2.5) cols = Math.max(1, Math.floor(wpx / 2.5));
   const seed = b.seed + face * 7919;
   for (let r = 0; r < rows; r++) {
-    const floorOn = b.floorMode ? (hashU(seed, r, 1) % 100) / 100 < b.lit * 1.3 : true;
+    const floorOn = b.floorMode ? (hashU(seed, r, 1) % 100) / 100 < b.lit : true;
     if (!floorOn) continue;
     const t0 = (r + 0.22) / rows, t1 = (r + 0.72) / rows;
     for (let c = 0; c < cols; c++) {
       const hv = hashU(seed, r, c + 3);
-      const lit = (hv % 1000) / 1000 < (b.floorMode ? 0.8 : b.lit);
+      const lit = (hv % 1000) / 1000 < (b.floorMode ? 0.55 : b.lit * 0.6);
       if (!lit) continue;
       const kind = (hv >>> 12) % 20;
       const p = kind < 14 ? paths.warm : kind < 18 ? paths.cool : paths.tv;
@@ -402,7 +432,37 @@ function bil(b0, b1, r0, r1, s, t) {
   const bx = r0[0] + (r1[0] - r0[0]) * s, by = r0[1] + (r1[1] - r0[1]) * s;
   return [ax + (bx - ax) * t, ay + (by - ay) * t];
 }
-const WIN_COL = { warm: '#ffcf7a', cool: '#bfe0ff', tv: '#6a8cff' };
+const WIN_COL = { warm: '#e0b46a', cool: '#a9cbe8', tv: '#5a78e0' };
+const GLASS = {
+  green: ['#0d2619', 'rgba(150,255,170,0.5)', 'rgba(150,255,170,0.12)'],
+  cyan: ['#0b2029', 'rgba(140,225,255,0.5)', 'rgba(140,225,255,0.12)'],
+  purple: ['#1a1029', 'rgba(205,150,255,0.45)', 'rgba(205,150,255,0.12)'],
+};
+// стеклянный фасад с вертикальными световыми полосами
+function drawGlassFace(ctx, b0, b1, r0, r1, b, face) {
+  const [base, strip, haze] = GLASS[b.glass];
+  ctx.fillStyle = base;
+  ctx.beginPath();
+  ctx.moveTo(b0[0], b0[1]); ctx.lineTo(b1[0], b1[1]); ctx.lineTo(r1[0], r1[1]); ctx.lineTo(r0[0], r0[1]);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = haze; ctx.fill();
+  const wpx = Math.hypot(b1[0] - b0[0], b1[1] - b0[1]);
+  const cols = Math.min(40, Math.max(2, Math.floor(wpx / 5)));
+  ctx.strokeStyle = strip; ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let c = 1; c < cols; c++) {
+    const p = bil(b0, b1, r0, r1, c / cols, 0), q = bil(b0, b1, r0, r1, c / cols, 1);
+    ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]);
+  }
+  ctx.stroke();
+  // яркие точки вдоль ребра крыши
+  ctx.fillStyle = '#ffffff';
+  const n = Math.max(2, Math.floor(wpx / 14));
+  for (let c = 0; c <= n; c++) {
+    const p = bil(b0, b1, r0, r1, c / n, 0.985);
+    ctx.fillRect(p[0] - 1.2, p[1] - 1.2, 2.4, 2.4);
+  }
+}
 function flushWindows(ctx, paths) {
   for (const k in paths) {
     const p = paths[k];
@@ -434,7 +494,7 @@ function drawDetails(ctx, b) {
       case 'rs': ctx.strokeStyle = d.c; ctx.lineWidth = d.lw || 1; ctx.strokeRect(d.x, d.y, d.w, d.h); break;
       case 'c': ctx.fillStyle = d.c; ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2); ctx.fill(); break;
       case 'H':
-        ctx.strokeStyle = '#e8d24a'; ctx.lineWidth = d.s * 0.22;
+        ctx.strokeStyle = '#a8963a'; ctx.lineWidth = d.s * 0.22;
         ctx.beginPath();
         ctx.moveTo(d.x - d.s * 0.5, d.y - d.s * 0.6); ctx.lineTo(d.x - d.s * 0.5, d.y + d.s * 0.6);
         ctx.moveTo(d.x + d.s * 0.5, d.y - d.s * 0.6); ctx.lineTo(d.x + d.s * 0.5, d.y + d.s * 0.6);

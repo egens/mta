@@ -13,7 +13,7 @@ const DS = 3600;               // шаг диагональных проспек
 const RAILG = 13;              // группа колонок, в которой может быть одна ж/д
 
 export const PAL = {
-  sidewalk: '#66686c', curb: '#8c8e92', asphalt: '#36373b', mark: '#d6d6cc',
+  sidewalk: '#55575c', curb: '#74767b', asphalt: '#2c2e33', mark: '#d6d6cc',
   grass: '#3d5a31', yard: '#456235', dirt: '#6b5536', sand: '#9c8458',
   paving: '#7a746b', water: '#10304a', bank: '#77736c', concrete: '#7a7b7e',
   rubber: '#7c4636', gravel: '#57524a', court: '#4b4c50', lotAsph: '#45464a',
@@ -206,9 +206,9 @@ export function getBlock(i, j) {
 }
 export const blockAt = (x, y) => getBlock(colAt(x), rowAt(y));
 
-const ROOFS = ['#3b3e46', '#43414a', '#373a40', '#4a453f', '#3c4552', '#31353c', '#46484d', '#403b37', '#3a4140'];
-const WALLS = ['#1e2129', '#272420', '#1c2230', '#28252b', '#20262a', '#2b2622', '#232029'];
-const HOUSE_ROOFS = ['#5b3d33', '#4a4a52', '#3d4a3a', '#6a4c3c', '#54443e', '#3e4250'];
+const ROOFS = ['#1c1e23', '#212328', '#18191d', '#23221f', '#1c2028', '#151619', '#26272b', '#1f1d1b'];
+const WALLS = ['#0d0f13', '#121316', '#0e1118', '#141216', '#101315'];
+const HOUSE_ROOFS = ['#2e221d', '#25262b', '#222a22', '#33271f', '#2b2421', '#22242c'];
 const CONT = ['#7a2e2a', '#2e4f7a', '#2f6a3a', '#8a6a2a', '#5a5a5e', '#7a4a1e', '#2e6a6a'];
 const NEON = ['pink', 'cyan', 'green', 'purple', 'yellow', 'blue'];
 
@@ -332,8 +332,8 @@ function scatterTrees(B, r, x, y, w, h, count, rmin = 14, rmax = 26, conifer = 0
   }
 }
 
-function addLamp(B, x, y, lx, ly, rad, c, i = 1, pole = true, blink = 0) {
-  B.lamps.push({ x, y, lx, ly, r: rad, c, i, pole, blink });
+function addLamp(B, x, y, lx, ly, rad, c, i = 1, pole = true, blink = 0, dot = false) {
+  B.lamps.push({ x, y, lx, ly, r: rad, c, i, pole, blink, dot });
   if (pole) B.circles.push({ x, y, r: 3 });
 }
 
@@ -354,9 +354,9 @@ function addParked(B, r, cx, cy, vertical, kind = 'car') {
 const STYLE = {
   tower(b, r) {
     b.lit = r.range(0.25, 0.6); b.floorMode = true; b.floorH = 18;
-    b.details.push({ t: 'rs', x: b.x + 5, y: b.y + 5, w: b.w - 10, h: b.h - 10, c: '#2b2e35', lw: 2 });
+    b.details.push({ t: 'rs', x: b.x + 5, y: b.y + 5, w: b.w - 10, h: b.h - 10, c: '#0f1013', lw: 2 });
     if (r() < 0.35 && b.w > 70 && b.h > 70) {
-      b.details.push({ t: 'c', x: b.cx, y: b.cy, r: Math.min(b.w, b.h) * 0.3, c: '#2c3036' });
+      b.details.push({ t: 'c', x: b.cx, y: b.cy, r: Math.min(b.w, b.h) * 0.3, c: '#202226' });
       b.details.push({ t: 'H', x: b.cx, y: b.cy, s: Math.min(b.w, b.h) * 0.18 });
       b.glows.push({ x: b.cx, y: b.cy, r: Math.min(b.w, b.h) * 0.35, c: 'yellow', i: 0.25 });
     } else {
@@ -365,14 +365,15 @@ const STYLE = {
     if (b.height > 260) {
       for (const [px, py] of corners(b, 6)) b.glows.push({ x: px, y: py, r: 22, c: 'red', i: 0.9, blink: 1.2 });
     }
-    if (r() < 0.3) b.crown = r.pick(NEON);
-    if (r() < 0.12) b.details.push({ t: 'r', x: b.x + b.w * 0.2, y: b.y + b.h * 0.2, w: b.w * 0.6, h: b.h * 0.35, c: '#2f4a2c' });
+    if (r() < 0.28) { b.glass = r.pick(['green', 'green', 'cyan', 'purple']); b.lit = 0; }
+    else if (r() < 0.15) b.crown = r.pick(NEON);
+    if (r() < 0.12) b.details.push({ t: 'r', x: b.x + b.w * 0.2, y: b.y + b.h * 0.2, w: b.w * 0.6, h: b.h * 0.35, c: '#17241a' });
   },
   office(b, r) {
     b.lit = r.range(0.2, 0.5); b.floorMode = true; b.floorH = 18;
-    b.details.push({ t: 'rs', x: b.x + 4, y: b.y + 4, w: b.w - 8, h: b.h - 8, c: '#2b2e35', lw: 2 });
+    b.details.push({ t: 'rs', x: b.x + 4, y: b.y + 4, w: b.w - 8, h: b.h - 8, c: '#0f1013', lw: 2 });
     roofBoxes(b, r, r.int(2, 5));
-    if (r() < 0.25) b.crown = r.pick(NEON);
+    if (r() < 0.12) b.crown = r.pick(NEON);
   },
   resid(b, r) {
     b.lit = r.range(0.2, 0.5); b.floorH = 20;
@@ -386,7 +387,7 @@ const STYLE = {
     for (let k = 0; k < n; k++) {
       const t = (k + 0.5) / n;
       const cx = long ? b.x + b.w * t : b.cx, cy = long ? b.cy : b.y + b.h * t;
-      b.details.push({ t: 'r', x: cx - 8, y: cy - 7, w: 16, h: 14, c: '#4a4c52' });
+      b.details.push({ t: 'r', x: cx - 8, y: cy - 7, w: 16, h: 14, c: '#26282d' });
     }
     b.details.push({ t: 'rs', x: b.x + 3, y: b.y + 3, w: b.w - 6, h: b.h - 6, c: '#2a2c31', lw: 1.5 });
   },
@@ -421,7 +422,7 @@ const STYLE = {
   canopy(b) { b.roof = '#d0d0cc'; b.wall = '#30302e'; b.lit = 0; b.floorH = b.height;
     b.details.push({ t: 'rs', x: b.x + 2, y: b.y + 2, w: b.w - 4, h: b.h - 4, c: '#e8402a', lw: 4 });
   },
-  shop(b, r) { b.lit = 0.55; b.floorH = 22; roofBoxes(b, r, r.int(1, 3)); if (r() < 0.4) b.crown = r.pick(NEON); },
+  shop(b, r) { b.lit = 0.55; b.floorH = 22; roofBoxes(b, r, r.int(1, 3)); if (r() < 0.15) b.crown = r.pick(NEON); },
   stall(b, r) { b.roof = r.pick(['#8a3a3a', '#3a6a8a', '#8a7a3a', '#3a8a5a', '#7a3a7a']); b.lit = 0; b.floorH = b.height;
     b.details.push({ t: 'r', x: b.x, y: b.cy - 0.75, w: b.w, h: 1.5, c: 'rgba(255,255,255,0.35)' });
   },
@@ -458,8 +459,8 @@ function roofBoxes(b, r, n) {
   for (let k = 0; k < n; k++) {
     const w = r.range(8, Math.min(26, b.w * 0.35)), h = r.range(8, Math.min(26, b.h * 0.35));
     const x = r.range(b.x + 6, b.x + b.w - w - 6), y = r.range(b.y + 6, b.y + b.h - h - 6);
-    b.details.push({ t: 'r', x, y, w, h, c: r.pick(['#565a62', '#4a4e55', '#60636a']) });
-    if (r() < 0.5) b.details.push({ t: 'c', x: x + w / 2, y: y + h / 2, r: Math.min(w, h) * 0.3, c: '#2e3136' });
+    b.details.push({ t: 'r', x, y, w, h, c: r.pick(['#2b2d32', '#26282c', '#313338']) });
+    if (r() < 0.5) b.details.push({ t: 'c', x: x + w / 2, y: y + h / 2, r: Math.min(w, h) * 0.3, c: '#141518' });
   }
 }
 const corners = (b, ins) => [[b.x + ins, b.y + ins], [b.x + b.w - ins, b.y + ins], [b.x + b.w - ins, b.y + b.h - ins], [b.x + ins, b.y + b.h - ins]];
@@ -478,22 +479,31 @@ function bsp(rect, min, depth, r) {
 }
 const lot = (B) => ({ x: B.lx0, y: B.ly0, w: B.lx1 - B.lx0, h: B.ly1 - B.ly0 });
 
-function shopLights(B, r, x, y, w, h) {
-  // неоновые вывески и витрины вдоль фасадов, обращённых к улице
+function shopLights(B, r, x, y, w, h, tol = 2, p = 0.5) {
+  // цепочки ярких LED-точек и витрины вдоль фасадов, обращённых к улице
   const sides = [];
-  if (Math.abs(y - B.ly0) < 2) sides.push([x, y - 9, x + w, y - 9]);
-  if (Math.abs(y + h - B.ly1) < 2) sides.push([x, y + h + 9, x + w, y + h + 9]);
-  if (Math.abs(x - B.lx0) < 2) sides.push([x - 9, y, x - 9, y + h]);
-  if (Math.abs(x + w - B.lx1) < 2) sides.push([x + w + 9, y, x + w + 9, y + h]);
+  if (y - B.ly0 < tol) sides.push([x, y - 7, x + w, y - 7]);
+  if (B.ly1 - (y + h) < tol) sides.push([x, y + h + 7, x + w, y + h + 7]);
+  if (x - B.lx0 < tol) sides.push([x - 7, y, x - 7, y + h]);
+  if (B.lx1 - (x + w) < tol) sides.push([x + w + 7, y, x + w + 7, y + h]);
   for (const [ax, ay, bx, by] of sides) {
     const len = Math.hypot(bx - ax, by - ay);
-    for (let t = 20; t < len - 15; t += 46) {
-      if (r() > 0.4) continue;
+    if (r() < p) {
+      const c = r.pick(LED);
+      const t0 = r.range(0, len * 0.4), t1 = r.range(len * 0.6, len);
+      const step = r.range(13, 19);
+      for (let t = t0 + 6; t < t1 - 6; t += step) {
+        const px = ax + ((bx - ax) * t) / len, py = ay + ((by - ay) * t) / len;
+        addLamp(B, px, py, px, py, 26, c, 0.9, false, 0, true);
+      }
+    } else if (r() < 0.5) {
+      const t = r.range(20, Math.max(21, len - 20));
       const px = ax + ((bx - ax) * t) / len, py = ay + ((by - ay) * t) / len;
-      addLamp(B, px, py, px, py, r.range(40, 70), r() < 0.5 ? 'warm' : r.pick(NEON), r.range(0.5, 0.9), false);
+      addLamp(B, px, py, px, py, r.range(40, 60), r() < 0.6 ? 'warm' : r.pick(NEON), 0.6, false);
     }
   }
 }
+const LED = ['white', 'white', 'white', 'purple', 'purple', 'pink', 'cyan', 'warm'];
 
 // ---------------------------------------------------------------- планировки
 const LAYOUT = {
@@ -552,7 +562,7 @@ const LAYOUT = {
         } else {
           addBuilding(B, r, x, y, w, h, height, r() < 0.7 ? 'tower' : 'office');
         }
-        for (const [px, py] of [[x - 10, y - 10], [x + w + 10, y + h + 10]]) addLamp(B, px, py, px, py, 120, 'white', 0.7);
+        shopLights(B, r, x, y, w, h, 60, 0.6);
         scatterTrees(B, r, P.x, P.y, P.w, P.h, 4, 10, 16, 0);
       } else if (roll < 0.85) plaza(B, r, P);
       else parking(B, r, P);
@@ -1027,13 +1037,14 @@ function railFences(B) {
 function streetLamps(B, r) {
   const { i, j } = B;
   const sides = [
-    [B.x0, B.y0 + 5, B.x1, B.y0 + 5, 0, -1, aveY(j), 60],
-    [B.x0, B.y1 - 5, B.x1, B.y1 - 5, 0, 1, aveY(j + 1), 122],
-    [B.x0 + 5, B.y0, B.x0 + 5, B.y1, -1, 0, aveX(i), 60],
-    [B.x1 - 5, B.y0, B.x1 - 5, B.y1, 1, 0, aveX(i + 1), 122],
+    [B.x0, B.y0 + 5, B.x1, B.y0 + 5, 0, -1, aveY(j), 60, j * 2],
+    [B.x0, B.y1 - 5, B.x1, B.y1 - 5, 0, 1, aveY(j + 1), 122, j * 2 + 2],
+    [B.x0 + 5, B.y0, B.x0 + 5, B.y1, -1, 0, aveX(i), 60, i * 2 + 1],
+    [B.x1 - 5, B.y0, B.x1 - 5, B.y1, 1, 0, aveX(i + 1), 122, i * 2 + 3],
   ];
   const sp = 150;
-  for (const [ax, ay, bx, by, nx, ny, ave, off] of sides) {
+  for (const [ax, ay, bx, by, nx, ny, ave, off, road] of sides) {
+    const sodium = !ave && hash(road, 0, 808) < 0.3;
     const len = Math.hypot(bx - ax, by - ay);
     const dx = (bx - ax) / len, dy = (by - ay) / len;
     const bad = (x, y) => {
@@ -1044,7 +1055,7 @@ function streetLamps(B, r) {
     };
     for (let t = off; t < len - 40; t += sp) {
       const x = ax + dx * t, y = ay + dy * t;
-      if (!bad(x, y)) addLamp(B, x, y, x + nx * 20, y + ny * 20, ave ? 175 : 155, ave ? 'white' : 'sodium', 1);
+      if (!bad(x, y)) addLamp(B, x, y, x + nx * 20, y + ny * 20, ave ? 140 : 125, sodium ? 'sodium' : 'white', 0.85);
       if (B.streetTrees) {
         const tt = t + sp / 2;
         if (tt < len - 40) {

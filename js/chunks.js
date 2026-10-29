@@ -310,7 +310,7 @@ function drawBridges(g, R, i0, i1, lamps, inChunk) {
       for (let v = ya; v < yb; v += 18) { g.fillRect(x - dw / 2 - 1, v, 5, 3); g.fillRect(x + dw / 2 - 4, v, 5, 3); }
       for (let v = Math.ceil(ya / 110) * 110, k = 0; v < yb - 10; v += 110, k++) {
         const s = (Math.round(v / 110) % 2) ? -1 : 1;
-        const l = { x: x + s * (dw / 2 - 6), y: v, lx: x + s * (w / 2 - 12), ly: v, r: 190, c: 'white', i: 1, pole: true };
+        const l = { x: x + s * (dw / 2 - 6), y: v, lx: x + s * (w / 2 - 12), ly: v, r: 140, c: 'white', i: 0.85, pole: true };
         drawPole(g, l);
         if (inChunk(l.x, l.y)) lamps.push(l);
       }
@@ -367,7 +367,7 @@ function drawDiag(g, d, R, pass, lamps, inChunk) {
     const [px, py] = P(t, s * (DIAG_W / 2 + 8));
     if (nearGridRoad(px, py) < 10) continue;
     const [lx, ly] = P(t, s * (DIAG_W / 2 - 16));
-    const l = { x: px, y: py, lx, ly, r: 200, c: 'white', i: 1, pole: true };
+    const l = { x: px, y: py, lx, ly, r: 140, c: 'white', i: 0.85, pole: true };
     drawPole(g, l);
     if (inChunk(px, py)) lamps.push(l);
   }
