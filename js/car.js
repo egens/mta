@@ -1,11 +1,32 @@
 // Аркадная физика машины игрока и столкновения.
 import * as W from './world.js';
 import { clamp } from './util.js';
+import { CS, peekChunk } from './chunks.js';
 
 export const MAX_SPEED = 580;
 
 export function createPlayer(x, y, a) {
-  return { x, y, a, vx: 0, vy: 0, steer: 0, L: 48, W: 23, brake: false, reverse: false, drift: 0 };
+  return {
+    x, y, a, vx: 0, vy: 0, steer: 0, L: 48, W: 23, brake: false, reverse: false, drift: 0,
+    hp: 100, dmg: { front: 0, rear: 0, left: 0, right: 0 }, dead: false, deadT: 0, gen: 0,
+  };
+}
+
+export function repairPlayer(P) {
+  P.hp = 100; P.dmg = { front: 0, rear: 0, left: 0, right: 0 }; P.dead = false; P.deadT = 0; P.gen++;
+}
+
+// Повреждения по зонам: удар приходит со стороны, противоположной нормали выталкивания
+export function damagePlayer(P, impact, nx, ny, st) {
+  if (P.dead || impact < 70) return;
+  const fx = Math.cos(P.a), fy = Math.sin(P.a);
+  const lx = -(nx * fx + ny * fy), ly = -(-nx * fy + ny * fx);
+  const zone = Math.abs(lx) > Math.abs(ly) ? (lx > 0 ? 'front' : 'rear') : (ly > 0 ? 'right' : 'left');
+  const amount = Math.min(45, (impact - 70) * 0.11);
+  P.hp = Math.max(0, P.hp - amount);
+  P.dmg[zone] = Math.min(1, P.dmg[zone] + amount / 45);
+  if (st) st.onDamage(zone, amount);
+  if (P.hp <= 0 && !P.dead) { P.dead = true; P.deadT = 0; if (st) st.onWreck(); }
 }
 
 export function updatePlayer(P, inp, dt, st) {
@@ -14,9 +35,13 @@ export function updatePlayer(P, inp, dt, st) {
   let vf = P.vx * fx + P.vy * fy;
   let vr = P.vx * rx + P.vy * ry;
   P.brake = false;
+  // повреждения: меньше мощность и максималка, машину уводит в сторону помятого бока
+  const perf = 0.5 + 0.5 * (P.hp / 100);
+  const vmax = MAX_SPEED * (0.55 + 0.45 * (P.hp / 100));
+  if (P.dead) inp = { up: false, down: false, left: false, right: false, hand: true };
   if (inp.up) {
     if (vf < -8) { vf += 1000 * dt; P.brake = true; }
-    else vf += 430 * (1 - Math.max(0, vf) / MAX_SPEED) * dt + 20 * dt;
+    else vf += 430 * perf * (1 - Math.max(0, vf) / vmax) * dt + 20 * dt;
   } else if (inp.down) {
     if (vf > 8) { vf -= 950 * dt; P.brake = true; }
     else vf = Math.max(-170, vf - 280 * dt);
@@ -28,7 +53,7 @@ export function updatePlayer(P, inp, dt, st) {
     P.brake = true;
   }
   P.reverse = vf < -8 && inp.down;
-  const target = (inp.left ? -1 : 0) + (inp.right ? 1 : 0);
+  const target = (inp.left ? -1 : 0) + (inp.right ? 1 : 0) + (P.dmg.right - P.dmg.left) * 0.12;
   P.steer += clamp(target - P.steer, -7 * dt, 7 * dt);
   const sp = Math.abs(vf);
   const turn = P.steer * 2.7 * clamp(vf / 130, -1, 1) / (1 + sp / 650) * (inp.hand ? 1.45 : 1);
@@ -53,7 +78,6 @@ export function updatePlayer(P, inp, dt, st) {
       st.skids.push([ox, oy, wx, wy]);
     }
     if (st.skids.length > 1600) st.skids.splice(0, 200);
-    if (Math.random() < 0.5) st.smoke.push({ x: P.x - nfx * 20, y: P.y - nfy * 20, vx: (Math.random() - 0.5) * 20, vy: (Math.random() - 0.5) * 20, s: 8, life: 1.2 });
   }
 
   // вода
@@ -144,7 +168,8 @@ function respond(c, h, bounce = 0.35) {
 }
 
 export function collideStatic(c, st, isPlayer) {
-  let impact = 0, ix = 0, iy = 0;
+  let impact = 0, ix = 0, iy = 0, inx = 0, iny = 0;
+  if (isPlayer) hitLamps(c, st);
   const r = Math.max(c.L, c.W);
   const i0 = W.colAt(c.x - r), i1 = W.colAt(c.x + r), j0 = W.rowAt(c.y - r), j1 = W.rowAt(c.y + r);
   for (let pass = 0; pass < 2; pass++) {
@@ -153,12 +178,12 @@ export function collideStatic(c, st, isPlayer) {
       for (const b of B.boxes) {
         if (c.x + r < b.x || c.x - r > b.x + b.w || c.y + r < b.y || c.y - r > b.y + b.h) continue;
         const h = obbAabb(c, b);
-        if (h) { const im = respond(c, h); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; } }
+        if (h) { const im = respond(c, h); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; inx = h.nx; iny = h.ny; } }
       }
       for (const ci of B.circles) {
         if (Math.abs(ci.x - c.x) > r + ci.r || Math.abs(ci.y - c.y) > r + ci.r) continue;
         const h = obbCircle(c, ci);
-        if (h) { const im = respond(c, h, 0.25); if (im > impact) { impact = im; ix = ci.x; iy = ci.y; } }
+        if (h) { const im = respond(c, h, 0.25); if (im > impact) { impact = im; ix = ci.x; iy = ci.y; inx = h.nx; iny = h.ny; } }
       }
     }
     if (st) for (const t of st.trains) {
@@ -168,12 +193,41 @@ export function collideStatic(c, st, isPlayer) {
       if (h) {
         c.vy += t.dir * t.speed * 0.5;
         const im = respond(c, h, 0.6) + 150;
-        if (im > impact) { impact = im; ix = c.x; iy = c.y; }
+        if (im > impact) { impact = im; ix = c.x; iy = c.y; inx = h.nx; iny = h.ny; }
       }
     }
   }
-  if (impact > 0 && st && isPlayer) st.onImpact(impact, ix, iy, true);
+  if (impact > 0 && st && isPlayer) {
+    st.onImpact(impact, ix, iy, true);
+    damagePlayer(c, impact, inx, iny, st);
+  }
   return impact;
+}
+
+// Столбы фонарей: на скорости ломаются и падают, медленно — обычное препятствие
+function hitLamps(c, st) {
+  const r = c.L / 2 + 6;
+  const cx0 = Math.floor((c.x - r) / CS), cx1 = Math.floor((c.x + r) / CS);
+  const cy0 = Math.floor((c.y - r) / CS), cy1 = Math.floor((c.y + r) / CS);
+  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
+    const ch = peekChunk(cx, cy);
+    if (!ch) continue;
+    for (const l of ch.lamps) {
+      if (!l.pole || l.broken || Math.abs(l.x - c.x) > r || Math.abs(l.y - c.y) > r) continue;
+      const h = obbCircle(c, { x: l.x, y: l.y, r: 3.5 });
+      if (!h) continue;
+      const sp = Math.hypot(c.vx, c.vy);
+      if (sp > 75) {
+        l.broken = true;
+        l.fallA = Math.atan2(c.vy, c.vx);
+        c.vx *= 0.8; c.vy *= 0.8;
+        st.onLampBreak(l, sp);
+        damagePlayer(c, 70 + sp * 0.12, h.nx, h.ny, st);
+      } else {
+        respond(c, h, 0.2);
+      }
+    }
+  }
 }
 
 export function collideCars(P, cars, st) {
@@ -193,6 +247,7 @@ export function collideCars(P, cars, st) {
       o.vx -= (j / mO) * h.nx; o.vy -= (j / mO) * h.ny;
       o.av += (Math.random() - 0.5) * Math.min(4, -rel * 0.012) * (4 / (mO + 3));
       st.onImpact(-rel, P.x - h.nx * 12, P.y - h.ny * 12, true);
+      damagePlayer(P, -rel, h.nx, h.ny, st);
     }
   }
 }

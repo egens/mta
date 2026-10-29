@@ -1,12 +1,19 @@
 // Городской трафик по сетке улиц, пешеходы на тротуарах и поезда.
 import * as W from './world.js';
-import { S } from './sprites.js';
-import { signalState } from './render.js';
+import { CAR_COLORS, CAR_DIM } from './sprites.js';
+import { hashU } from './util.js';
 import { obbObb, collideStatic } from './car.js';
 
 const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
 const MAX_CARS = 34;
 const MAX_PEDS = 46;
+
+// светофор: 0 — зелёный по горизонтали, 1 — жёлтый гориз., 2 — зелёный по вертикали, 3 — жёлтый верт.
+export function signalState(i, j, t) {
+  const off = ((hashU(i, j, 707) % 1000) / 1000) * 16;
+  const p = (t + off) % 16;
+  return p < 6.5 ? 0 : p < 8 ? 1 : p < 14.5 ? 2 : 3;
+}
 
 function edgeExists(i, j, d) {
   if (d === 0) return W.hSegExists(i, j);
@@ -72,12 +79,13 @@ function makeTurn(c, d2) {
 function pickSprite(c) {
   const r = Math.random();
   c.heavy = false; c.police = false;
-  if (r < 0.08) { c.spr = S.trucks[(Math.random() * S.trucks.length) | 0]; c.heavy = true; c.cruise *= 0.8; }
-  else if (r < 0.13) { c.spr = S.bus; c.heavy = true; c.cruise *= 0.75; }
-  else if (r < 0.36) c.spr = S.taxi;
-  else if (r < 0.39) { c.spr = S.police; c.police = true; }
-  else c.spr = S.cars[(Math.random() * S.cars.length) | 0];
-  c.L = c.spr.L; c.W = c.spr.W;
+  const pick = (a) => a[(Math.random() * a.length) | 0];
+  if (r < 0.08) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.cruise *= 0.8; }
+  else if (r < 0.13) { c.kind = 'bus'; c.color = '#d0d4d8'; c.heavy = true; c.cruise *= 0.75; }
+  else if (r < 0.36) { c.kind = 'taxi'; c.color = '#e8b81c'; }
+  else if (r < 0.39) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
+  else { c.kind = pick(['sedan', 'sedan', 'sedan', 'hatch', 'van']); c.color = pick(CAR_COLORS); }
+  [c.L, c.W] = CAR_DIM[c.kind];
 }
 
 function spawnCar(st) {

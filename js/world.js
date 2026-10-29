@@ -333,8 +333,8 @@ function scatterTrees(B, r, x, y, w, h, count, rmin = 14, rmax = 26, conifer = 0
 }
 
 function addLamp(B, x, y, lx, ly, rad, c, i = 1, pole = true, blink = 0, dot = false) {
-  B.lamps.push({ x, y, lx, ly, r: rad, c, i, pole, blink, dot });
-  if (pole) B.circles.push({ x, y, r: 3 });
+  // столбы сталкиваются через списки фонарей чанков (car.js), чтобы их можно было сломать
+  B.lamps.push({ x, y, lx, ly, r: rad, c, i, pole, blink, dot, broken: false });
 }
 
 const CAR_L = 46, CAR_W = 22;

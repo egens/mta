@@ -1,14 +1,13 @@
+// Игра: физика, ввод, камера, HUD. Отрисовка — воксельная (voxel.js).
 import * as W from './world.js';
 import { initSprites } from './sprites.js';
-import { drawFrame, ensureChunks, setupLights } from './render.js';
-import { createPlayer, updatePlayer, collideStatic, collideCars, MAX_SPEED } from './car.js';
+import { createPlayer, updatePlayer, collideStatic, collideCars, repairPlayer, MAX_SPEED } from './car.js';
 import { updateTraffic, updatePeds, updateTrains } from './traffic.js';
 import { clamp, lerp } from './util.js';
 import { rain, updateRain } from './rain.js';
-import { setChunkObjects } from './chunks.js';
+import { createAudio } from './audio.js';
+import { createVoxel } from './voxel.js';
 
-const cv = document.getElementById('game');
-const ctx = cv.getContext('2d', { alpha: false });
 const glCv = document.getElementById('gl');
 const mini = document.getElementById('minimap');
 const mctx = mini.getContext('2d');
@@ -17,102 +16,79 @@ const hudDistrict = document.getElementById('district');
 const hudToast = document.getElementById('toast');
 const hudLoad = document.getElementById('loading');
 const hudStats = document.getElementById('stats');
+const hudHp = document.getElementById('hpbar');
+const hudHpBox = document.getElementById('hp');
 
 initSprites();
+const audio = createAudio();
 
 let DPR = 1;
-// ---------------------------------------------------------------- режимы графики
-let gfx = 'flat';
-let vox = null, voxFirst = false, voxLoading = false;
-async function setGfx(mode) {
-  if (mode === 'voxel' && !vox) {
-    if (voxLoading) return;
-    voxLoading = true;
-    try {
-      const m = await import('./voxel.js');
-      vox = m.createVoxel(glCv);
-      vox.resize(st.W, st.H);
-    } catch (e) {
-      console.error(e);
-      voxLoading = false;
-      toast('Воксельный режим недоступен: нет WebGL');
-      return;
-    }
-    voxLoading = false;
-  }
-  gfx = mode;
-  setChunkObjects(mode !== 'voxel');
-  voxFirst = true;
-  glCv.classList.toggle('hidden', mode !== 'voxel');
-  cv.classList.toggle('hidden', mode === 'voxel');
-  try { localStorage.setItem('gfx', mode); } catch (e) { /* приватный режим */ }
-  const b = document.getElementById('gfxbtn');
-  if (b) b.textContent = mode === 'voxel' ? 'ВОКСЕЛИ' : '2D';
-}
-function toggleRain() {
-  rain.on = !rain.on;
-  toast(rain.on ? 'Дождь' : 'Ясно');
-  const b = document.getElementById('rainbtn');
-  if (b) b.classList.toggle('off', !rain.on);
-}
 const st = {
-  cam: { x: 0, y: 0, z: 1 }, W: 0, H: 0, time: 0, viewR: 1000,
-  player: null, traffic: [], peds: [], trains: [], skids: [], smoke: [], particles: [],
-  shake: 0, hits: 0, peds_hit: 0, dist: 0,
+  cam: { x: 0, y: 0, z: 1 }, W: 0, H: 0, time: 0, dt: 0, viewR: 2000,
+  player: null, traffic: [], peds: [], trains: [], skids: [], fx: [],
+  shake: 0, dist: 0,
   onImpact(power, x, y, sparks) {
     if (power < 40) return;
     this.shake = Math.min(14, this.shake + power * 0.03);
-    if (sparks) {
-      const n = Math.min(24, (power / 15) | 0);
-      for (let k = 0; k < n; k++) {
-        const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * power;
-        this.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.3 + Math.random() * 0.4, c: Math.random() < 0.5 ? 'yellow' : 'orange', s: 3 + Math.random() * 3, light: k < 2 });
-      }
-    }
-    audio.thud(Math.min(1, power / 400));
-    if (power > 120) this.hits++;
+    if (sparks) this.fx.push({ type: 'sparks', x, y, n: Math.min(30, (power / 12) | 0) });
+    if (power > 150) this.fx.push({ type: 'debris', x, y, color: '#d8262a', n: Math.min(14, (power / 40) | 0) });
+    audio.crash(power);
   },
-  onPedHit(p) {
-    this.peds_hit++;
+  onDamage(zone, amount) {
+    if (amount > 8) toast(zone === 'front' ? 'Помят перед' : zone === 'rear' ? 'Помят зад' : 'Помят бок');
+  },
+  onWreck() {
+    const P = this.player;
+    this.fx.push({ type: 'explode', x: P.x, y: P.y });
+    this.shake = 20;
+    audio.explode();
+    toast('Машина разбита! Новая через пару секунд…');
+  },
+  onLampBreak(l, sp) {
+    this.fx.push({ type: 'lamp', lamp: l });
+    this.shake = Math.min(14, this.shake + 4);
+    audio.lampHit();
+  },
+  onPedHit() {
     audio.thud(0.4);
     toast('Осторожнее на тротуаре!');
   },
 };
 
 // ---------------------------------------------------------------- старт на дороге
-function findStart() {
-  for (let r = 0; r < 12; r++) for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) {
-    if (!W.vSegExists(i, j)) continue;
+function roadSpot(i0, j0) {
+  for (let r = 0; r < 12; r++) for (let i = i0 - r; i <= i0 + r; i++) for (let j = j0 - r; j <= j0 + r; j++) {
     const x = W.roadX(i) - 21, y = (W.roadY(j) + W.roadY(j + 1)) / 2;
     if (!W.isWater(x, y)) return [x, y];
   }
-  return [W.roadX(0) - 21, W.roadY(0) + 300];
+  return [W.roadX(i0) - 21, W.roadY(j0) + 300];
 }
-const [sx, sy] = findStart();
+const [sx, sy] = roadSpot(0, 0);
 st.player = createPlayer(sx, sy, Math.PI / 2);
 st.cam.x = sx; st.cam.y = sy;
 
 function respawn() {
   const P = st.player;
-  const i = W.colAt(P.x), j = W.rowAt(P.y);
-  for (let r = 0; r < 8; r++) for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
-    if (!W.vSegExists(i + di, j + dj)) continue;
-    const x = W.roadX(i + di) - 21, y = (W.roadY(j + dj) + W.roadY(j + dj + 1)) / 2;
-    if (W.isWater(x, y)) continue;
-    P.x = x; P.y = y; P.a = Math.PI / 2; P.vx = P.vy = 0;
-    return;
-  }
+  const [x, y] = roadSpot(W.colAt(P.x), W.rowAt(P.y));
+  P.x = x; P.y = y; P.a = Math.PI / 2; P.vx = P.vy = 0;
+  repairPlayer(P);
 }
 
-// ---------------------------------------------------------------- размер
+// ---------------------------------------------------------------- графика
+let vox = null;
+try {
+  vox = createVoxel(glCv);
+} catch (e) {
+  console.error(e);
+  hudLoad.textContent = 'Нужен браузер с поддержкой WebGL';
+}
+
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const w = window.innerWidth, h = window.innerHeight;
-  DPR = Math.min(dpr, Math.sqrt(3200000 / (w * h)));
-  st.W = cv.width = Math.round(w * DPR);
-  st.H = cv.height = Math.round(h * DPR);
-  cv.style.width = w + 'px'; cv.style.height = h + 'px';
-  setupLights(st.W, st.H);
+  DPR = Math.min(dpr, Math.sqrt(2600000 / (w * h)));
+  st.W = Math.round(w * DPR);
+  st.H = Math.round(h * DPR);
   glCv.width = st.W; glCv.height = st.H;
   glCv.style.width = w + 'px'; glCv.style.height = h + 'px';
   if (vox) vox.resize(st.W, st.H);
@@ -123,6 +99,12 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
+function toggleRain() {
+  rain.on = !rain.on;
+  toast(rain.on ? 'Дождь' : 'Ясно');
+  document.getElementById('rainbtn').classList.toggle('off', !rain.on);
+}
+
 // ---------------------------------------------------------------- ввод
 const keys = {};
 const inp = { up: false, down: false, left: false, right: false, hand: false };
@@ -131,10 +113,9 @@ window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
   audio.start();
   if (e.code === 'KeyH') document.getElementById('help').classList.toggle('hidden');
-  if (e.code === 'KeyM') audio.toggle();
-  if (e.code === 'KeyR') respawn();
+  if (e.code === 'KeyM') toast(audio.toggle() ? 'Звук выключен' : 'Звук включен');
+  if (e.code === 'KeyR' && !e.repeat) respawn();
   if (e.code === 'KeyE') audio.horn(true);
-  if (e.code === 'KeyV' && !e.repeat) setGfx(gfx === 'voxel' ? 'flat' : 'voxel');
   if (e.code === 'KeyT' && !e.repeat) toggleRain();
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
   hideIntro();
@@ -153,8 +134,8 @@ for (const el of document.querySelectorAll('[data-k]')) {
 }
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) document.body.classList.add('touch');
 document.getElementById('intro').addEventListener('click', () => { audio.start(); hideIntro(); });
-document.getElementById('gfxbtn').addEventListener('click', (e) => { e.stopPropagation(); setGfx(gfx === 'voxel' ? 'flat' : 'voxel'); });
 document.getElementById('rainbtn').addEventListener('click', (e) => { e.stopPropagation(); toggleRain(); });
+document.getElementById('fixbtn').addEventListener('click', (e) => { e.stopPropagation(); respawn(); });
 function hideIntro() { document.getElementById('intro').classList.add('hidden'); }
 
 function readInput() {
@@ -164,71 +145,6 @@ function readInput() {
   inp.right = keys.ArrowRight || keys.KeyD || touch.right;
   inp.hand = keys.Space || touch.hand;
 }
-
-// ---------------------------------------------------------------- звук
-const audio = (() => {
-  let ac = null, osc, osc2, gain, filt, hornG, muted = false;
-  return {
-    start() {
-      if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
-      try {
-        ac = new (window.AudioContext || window.webkitAudioContext)();
-        osc = ac.createOscillator(); osc.type = 'sawtooth';
-        osc2 = ac.createOscillator(); osc2.type = 'square';
-        filt = ac.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 400;
-        gain = ac.createGain(); gain.gain.value = 0;
-        const g2 = ac.createGain(); g2.gain.value = 0.3;
-        osc.connect(filt); osc2.connect(g2); g2.connect(filt); filt.connect(gain); gain.connect(ac.destination);
-        osc.start(); osc2.start();
-        const h1 = ac.createOscillator(), h2 = ac.createOscillator();
-        h1.type = h2.type = 'square'; h1.frequency.value = 392; h2.frequency.value = 494;
-        hornG = ac.createGain(); hornG.gain.value = 0;
-        const hf = ac.createBiquadFilter(); hf.type = 'lowpass'; hf.frequency.value = 1500;
-        h1.connect(hf); h2.connect(hf); hf.connect(hornG); hornG.connect(ac.destination);
-        h1.start(); h2.start();
-      } catch (e) { ac = null; }
-    },
-    update(speed, throttle) {
-      if (!ac) return;
-      const rpm = 0.15 + (speed / MAX_SPEED) * 0.85;
-      const gear = ((speed / MAX_SPEED) * 5) % 1;
-      const f = 45 + rpm * 90 + gear * 40 + (throttle ? 12 : 0);
-      osc.frequency.setTargetAtTime(f, ac.currentTime, 0.05);
-      osc2.frequency.setTargetAtTime(f * 0.5, ac.currentTime, 0.05);
-      filt.frequency.setTargetAtTime(300 + rpm * 900 + (throttle ? 300 : 0), ac.currentTime, 0.08);
-      gain.gain.setTargetAtTime(muted ? 0 : 0.05 + rpm * 0.05 + (throttle ? 0.03 : 0), ac.currentTime, 0.1);
-    },
-    thud(k) {
-      if (!ac || muted) return;
-      const n = ac.createBufferSource();
-      const len = (ac.sampleRate * 0.25) | 0;
-      const buf = ac.createBuffer(1, len, ac.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
-      n.buffer = buf;
-      const g = ac.createGain(); g.gain.value = 0.25 + k * 0.5;
-      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 600 + k * 1500;
-      n.connect(f); f.connect(g); g.connect(ac.destination);
-      n.start();
-    },
-    rain(k) {
-      if (!ac) return;
-      if (!this.rn) {
-        const len = ac.sampleRate * 2;
-        const buf = ac.createBuffer(1, len, ac.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-        const src = ac.createBufferSource(); src.buffer = buf; src.loop = true;
-        const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 2500; f.Q.value = 0.4;
-        this.rn = ac.createGain(); this.rn.gain.value = 0;
-        src.connect(f); f.connect(this.rn); this.rn.connect(ac.destination); src.start();
-      }
-      this.rn.gain.setTargetAtTime(muted ? 0 : 0.05 * k, ac.currentTime, 0.3);
-    },
-    horn(on) { if (ac && hornG) hornG.gain.setTargetAtTime(on && !muted ? 0.08 : 0, ac.currentTime, 0.02); },
-    toggle() { muted = !muted; toast(muted ? 'Звук выключен' : 'Звук включен'); },
-  };
-})();
 
 // ---------------------------------------------------------------- HUD
 let toastT = 0;
@@ -320,54 +236,39 @@ function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   st.time += dt;
+  st.dt = dt;
   frame++;
   readInput();
   const P = st.player;
   const n = dt > 0.022 ? 2 : 1;
   for (let k = 0; k < n; k++) step(dt / n);
   updateTrains(st);
+  if (P.dead) { P.deadT += dt; if (P.deadT > 3.5) respawn(); }
   const speed = Math.hypot(P.vx, P.vy);
   st.dist += speed * dt;
 
   // камера
   const minDim = Math.min(st.W, st.H);
   const viewMin = lerp(820, 1350, clamp(speed / MAX_SPEED, 0, 1));
-  const zt = minDim / viewMin;
-  st.cam.z += (zt - st.cam.z) * Math.min(1, dt * 1.5);
+  st.cam.z += (minDim / viewMin - st.cam.z) * Math.min(1, dt * 1.5);
   const lx = P.x + P.vx * 0.45, ly = P.y + P.vy * 0.45;
   st.cam.x += (lx - st.cam.x) * Math.min(1, dt * 4);
   st.cam.y += (ly - st.cam.y) * Math.min(1, dt * 4);
-  st.viewR = Math.hypot(st.W, st.H) / 2 / st.cam.z;
   const camDraw = { ...st.cam };
   if (st.shake > 0.1) {
     camDraw.x += (Math.random() - 0.5) * st.shake * 2;
     camDraw.y += (Math.random() - 0.5) * st.shake * 2;
     st.shake *= Math.exp(-dt * 8);
   }
-
-  // частицы
-  for (const p of st.particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.94; p.vy *= 0.94; p.life -= dt; }
-  st.particles = st.particles.filter((p) => p.life > 0);
-  for (const p of st.smoke) { p.x += p.vx * dt; p.y += p.vy * dt; p.s += dt * 14; p.life -= dt; }
-  st.smoke = st.smoke.filter((p) => p.life > 0);
-  if (st.smoke.length > 300) st.smoke.splice(0, st.smoke.length - 300);
-
   updateRain(st, dt);
-  let pending;
-  if (gfx === 'voxel' && vox) {
-    st.viewR = Math.max(st.viewR, 2000);
-    pending = vox.render({ ...st, cam: camDraw }, voxFirst);
-    voxFirst = false;
-  } else {
-    // подгрузка чанков: первые кадры — без ограничений
-    pending = ensureChunks(st.cam, st.W, st.H, frame < 3 ? 200 : 3, { x: P.vx * 0.8, y: P.vy * 0.8 });
-    drawFrame(ctx, { ...st, cam: camDraw });
-  }
-  hudLoad.classList.toggle('hidden', frame > 2);
+  const pending = vox ? vox.render({ ...st, cam: camDraw }, frame < 3) : 0;
+  hudLoad.classList.toggle('hidden', frame > 2 && !!vox);
 
   // HUD
-  const kmh = Math.round((speed / 10) * 3.6);
-  hudSpeed.textContent = kmh;
+  hudSpeed.textContent = Math.round((speed / 10) * 3.6);
+  hudHp.style.width = P.hp + '%';
+  hudHp.style.background = P.hp > 60 ? '#5ee68a' : P.hp > 30 ? '#ffd27a' : '#ff4f5a';
+  hudHpBox.classList.toggle('low', P.hp < 30);
   const dname = W.districtAt(P.x, P.y);
   if (dname !== lastDistrict) {
     lastDistrict = dname;
@@ -376,21 +277,15 @@ function loop(now) {
   }
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) hudToast.classList.remove('show'); }
   if (frame % 3 === 0) drawMinimap();
-  audio.update(speed, inp.up);
-  audio.rain(rain.k);
+  audio.update(dt, Math.hypot(P.vx, P.vy) * Math.sign(P.vx * Math.cos(P.a) + P.vy * Math.sin(P.a) || 1), MAX_SPEED, inp.up && !P.dead, P.drift, rain.k, P.dead);
 
   fpsN++; fpsT += dt;
   if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
-  if (showStats) hudStats.textContent = `${fps.toFixed(0)} fps · машин ${st.traffic.length} · пешеходов ${st.peds.length} · чанков в очереди ${pending}`;
+  if (showStats) hudStats.textContent = `${fps.toFixed(0)} fps · машин ${st.traffic.length} · пешеходов ${st.peds.length} · в очереди ${pending}`;
   hudStats.classList.toggle('hidden', !showStats);
   document.getElementById('odo').textContent = (st.dist / 10000).toFixed(2) + ' км';
 
   requestAnimationFrame(loop);
 }
-let startGfx = 'flat';
-try { startGfx = localStorage.getItem('gfx') || 'flat'; } catch (e) { /* приватный режим */ }
-const qg = new URLSearchParams(location.search).get('gfx');
-if (qg) startGfx = qg;
-if (startGfx === 'voxel') setGfx('voxel');
 requestAnimationFrame(loop);
 window.game = st;

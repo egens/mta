@@ -1,7 +1,6 @@
 // Отрисовка земли (дороги, кварталы, реки, мосты) в кэшируемые тайлы-чанки.
 import * as W from './world.js';
 import { PAL, SW, DIAG_W, RAIL_W, RP } from './world.js';
-import { drawCarSprite, spriteFor } from './sprites.js';
 import { hash } from './util.js';
 
 export const CS = 512;
@@ -9,13 +8,6 @@ const MAX_CHUNKS = 96;
 const TAU = Math.PI * 2;
 const cache = new Map();
 let tick = 0;
-// в воксельном режиме деревья, машины и столбы строятся в 3D, на земле их не рисуем
-let flatObjects = true;
-export function setChunkObjects(on) {
-  if (flatObjects === on) return;
-  flatObjects = on;
-  cache.clear();
-}
 
 export function chunkKey(cx, cy) { return cx + ',' + cy; }
 export function peekChunk(cx, cy) {
@@ -61,16 +53,17 @@ function buildChunk(cx, cy) {
   for (const d of diags) drawDiag(g, d, R, 'sidewalk');
   const rails = W.railsInRange(x0, x1);
   for (const i of rails) { g.fillStyle = PAL.gravel; g.fillRect(W.railX(i) - RAIL_W / 2, y0 - 2, RAIL_W, CS + 4); }
-  drawGridRoads(g, R, i0, i1, j0, j1);
+  drawGridAsphalt(g, R, i0, i1, j0, j1);
+  // разметка сетки не заходит на диагональные проспекты
+  g.save();
+  for (const d of diags) clipOutside(g, R, diagBand(d, R, DIAG_W / 2 + SW));
+  drawGridMarks(g, R, i0, i1, j0, j1);
+  g.restore();
   drawRivers(g, R);
   drawBridges(g, R, i0, i1, j0, j1, lamps, inChunk);
-  for (const d of diags) drawDiag(g, d, R, 'road', lamps, inChunk);
+  for (const d of diags) drawDiag(g, d, R, 'road', lamps, inChunk, i0, i1, j0, j1, diags);
   for (const i of rails) drawRailTracks(g, W.railX(i), R, j0, j1);
-  if (flatObjects) for (const B of blocks) drawBlockObjects(g, B);
-  for (const B of blocks) for (const l of B.lamps) {
-    if (l.pole) drawPole(g, l);
-    if (inChunk(l.x, l.y)) lamps.push(l);
-  }
+  for (const B of blocks) for (const l of B.lamps) if (inChunk(l.x, l.y)) lamps.push(l);
   return { cx, cy, canvas: cv, lamps };
 }
 
@@ -142,64 +135,24 @@ function drawPond(g, o) {
   pondPath(g, o, 0.6); g.fillStyle = '#0c2236'; g.fill();
 }
 
-const TREE_COLS = [['#2d5a2a', '#3f7a34'], ['#2a4f30', '#3a6a3c'], ['#3a5a26', '#507a30'], ['#30492a', '#47683a']];
-function drawTree(g, t) {
-  g.fillStyle = 'rgba(0,0,0,0.35)';
-  g.beginPath(); g.arc(t.x + 4, t.y + 5, t.r, 0, TAU); g.fill();
-  if (t.kind === 1) {
-    for (const [s, c] of [[1, '#1d452c'], [0.62, '#2a5a38']]) {
-      g.beginPath();
-      for (let k = 0; k < 18; k++) {
-        const a = (k / 18) * TAU, rr = (k % 2 ? 0.62 : 1) * t.r * s;
-        const x = t.x + Math.cos(a) * rr, y = t.y + Math.sin(a) * rr;
-        if (k) g.lineTo(x, y); else g.moveTo(x, y);
-      }
-      g.closePath(); g.fillStyle = c; g.fill();
-    }
-    return;
-  }
-  const [c0, c1] = TREE_COLS[t.v % 4];
-  g.fillStyle = c0;
-  g.beginPath(); g.arc(t.x, t.y, t.r, 0, TAU); g.fill();
-  for (let k = 0; k < 4; k++) {
-    const a = k * 1.7 + t.v;
-    g.beginPath(); g.arc(t.x + Math.cos(a) * t.r * 0.45, t.y + Math.sin(a) * t.r * 0.45, t.r * 0.55, 0, TAU); g.fill();
-  }
-  g.fillStyle = c1;
-  g.beginPath(); g.arc(t.x - t.r * 0.25, t.y - t.r * 0.25, t.r * 0.5, 0, TAU); g.fill();
-}
-
-function drawBlockObjects(g, B) {
-  for (const p of B.parked) drawCarSprite(g, spriteFor(p.kind, p.spr), p.x, p.y, p.a);
-  for (const p of B.props) if (p.t === 'excavator') drawExcavator(g, p);
-  for (const t of B.trees) drawTree(g, t);
-}
-
-function drawExcavator(g, p) {
-  g.save(); g.translate(p.x, p.y); g.rotate(p.a);
-  g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(-14, -12, 32, 28);
-  g.fillStyle = '#2a2a2a'; g.fillRect(-18, -15, 34, 7); g.fillRect(-18, 8, 34, 7);
-  g.fillStyle = '#d8a520'; g.fillRect(-12, -10, 24, 20);
-  g.fillStyle = '#1a2430'; g.fillRect(2, -9, 8, 8);
-  g.strokeStyle = '#c89515'; g.lineWidth = 5; g.beginPath(); g.moveTo(8, 4); g.lineTo(34, 8); g.lineTo(44, 0); g.stroke();
-  g.fillStyle = '#555'; g.fillRect(42, -6, 7, 12);
-  g.restore();
-}
-
-function drawPole(g, l) {
-  if (!flatObjects) return;
-  if (l.lx !== l.x || l.ly !== l.y) {
-    g.strokeStyle = '#5c5e62'; g.lineWidth = 1.6;
-    g.beginPath(); g.moveTo(l.x, l.y); g.lineTo(l.x + (l.lx - l.x) * 0.85, l.y + (l.ly - l.y) * 0.85); g.stroke();
-  }
-  g.fillStyle = '#2a2b2e';
-  g.beginPath(); g.arc(l.x + 1, l.y + 1.5, 3, 0, TAU); g.fill();
-  g.fillStyle = '#8a8c90';
-  g.beginPath(); g.arc(l.x, l.y, 2.6, 0, TAU); g.fill();
-}
-
 // ---------------------------------------------------------------- улицы
-function drawGridRoads(g, R, i0, i1, j0, j1) {
+// Обрезка «всё, кроме многоугольника»: пересечение нескольких таких обрезок исключает их все
+function clipOutside(g, R, poly) {
+  g.beginPath();
+  g.rect(R.x0 - 100, R.y0 - 100, CS + 200, CS + 200);
+  g.moveTo(poly[0][0], poly[0][1]);
+  for (let k = 1; k < poly.length; k++) g.lineTo(poly[k][0], poly[k][1]);
+  g.closePath();
+  g.clip('evenodd');
+}
+function diagBand(d, R, half) {
+  const [dx, dy] = W.diagDir(d), [nx, ny] = W.diagNorm(d), [ox, oy] = W.diagOrigin(d);
+  const tc = (R.x0 + CS / 2 - ox) * dx + (R.y0 + CS / 2 - oy) * dy;
+  const P = (t, u) => [ox + dx * t + nx * u, oy + dy * t + ny * u];
+  return [P(tc - CS * 1.6, -half), P(tc + CS * 1.6, -half), P(tc + CS * 1.6, half), P(tc - CS * 1.6, half)];
+}
+
+function drawGridAsphalt(g, R, i0, i1, j0, j1) {
   g.fillStyle = PAL.asphalt;
   for (let i = i0; i <= i1 + 1; i++) {
     const x = W.roadX(i), w = W.widthX(i);
@@ -217,6 +170,8 @@ function drawGridRoads(g, R, i0, i1, j0, j1) {
     const hx = hash(R.x0, R.y0, k * 2), hy = hash(R.x0, R.y0, k * 2 + 1);
     g.beginPath(); g.ellipse(R.x0 + hx * CS, R.y0 + hy * CS, 4 + hx * 14, 3 + hy * 8, hx * 6, 0, TAU); g.fill();
   }
+}
+function drawGridMarks(g, R, i0, i1, j0, j1) {
   for (let i = i0; i <= i1 + 1; i++) for (let j = j0 - 1; j <= j1 + 1; j++) segMarks(g, R, true, i, j);
   for (let j = j0; j <= j1 + 1; j++) for (let i = i0 - 1; i <= i1 + 1; i++) segMarks(g, R, false, i, j);
 }
@@ -348,14 +303,13 @@ function bridgeDeck(g, vert, c, w, ave, a, b, lamps, inChunk) {
     const l = vert
       ? { x: c + s * (dw / 2 - 6), y: v, lx: c + s * (w / 2 - 12), ly: v }
       : { x: v, y: c + s * (dw / 2 - 6), lx: v, ly: c + s * (w / 2 - 12) };
-    Object.assign(l, { r: 140, c: 'white', i: 0.85, pole: true });
-    drawPole(g, l);
+    Object.assign(l, { r: 140, c: 'white', i: 0.85, pole: true, broken: false });
     if (inChunk(l.x, l.y)) lamps.push(l);
   }
 }
 
 // ---------------------------------------------------------------- диагонали
-function drawDiag(g, d, R, pass, lamps, inChunk) {
+function drawDiag(g, d, R, pass, lamps, inChunk, i0, i1, j0, j1, diags) {
   const [dx, dy] = W.diagDir(d), [nx, ny] = W.diagNorm(d), [ox, oy] = W.diagOrigin(d);
   const ccx = R.x0 + CS / 2, ccy = R.y0 + CS / 2;
   const tc = (ccx - ox) * dx + (ccy - oy) * dy;
@@ -391,11 +345,52 @@ function drawDiag(g, d, R, pass, lamps, inChunk) {
     seg(s, e, -(DIAG_W / 2 + SW + 1), 3, '#a4a6aa');
   }
   seg(ta, tb, 0, DIAG_W, PAL.asphalt);
+  // перекрёстки с сеткой: разметка диагонали обрывается перед зеброй, зебра идёт вдоль кромки улицы
+  const roads = [];
+  for (let i = i0; i <= i1 + 1; i++) roads.push([true, W.roadX(i), W.widthX(i) / 2]);
+  for (let j = j0; j <= j1 + 1; j++) roads.push([false, W.roadY(j), W.widthY(j) / 2]);
+  g.save();
+  for (const [vert, c, h] of roads) {
+    const p = 30;
+    clipOutside(g, R, vert ? [[c - h - p, R.y0 - 200], [c + h + p, R.y0 - 200], [c + h + p, R.y1 + 200], [c - h - p, R.y1 + 200]]
+      : [[R.x0 - 200, c - h - p], [R.x1 + 200, c - h - p], [R.x1 + 200, c + h + p], [R.x0 - 200, c + h + p]]);
+  }
+  for (const o of diags) if (o !== d) clipOutside(g, R, diagBand(o, R, DIAG_W / 2 + 4));
   seg(ta, tb, DIAG_W / 2 - 1, 2, PAL.curb);
   seg(ta, tb, -(DIAG_W / 2 - 1), 2, PAL.curb);
   seg(ta, tb, -3, 2, PAL.mark); seg(ta, tb, 3, 2, PAL.mark);
   seg(ta, tb, DIAG_W / 4 + 1, 2, PAL.mark, [20, 20]);
   seg(ta, tb, -(DIAG_W / 4 + 1), 2, PAL.mark, [20, 20]);
+  g.restore();
+  g.fillStyle = 'rgba(225,225,215,0.85)';
+  const H = DIAG_W / 2;
+  const quad = (t1, t2, u1, u2) => {
+    const a = P(t1, u1), b = P(t2, u1), c = P(t2, u2), e = P(t1, u2);
+    g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.lineTo(c[0], c[1]); g.lineTo(e[0], e[1]); g.closePath();
+  };
+  g.beginPath();
+  for (const [vert, c, h] of roads) {
+    const dd = vert ? dx : dy, nn = vert ? nx : ny, oo = vert ? ox : oy;
+    if (Math.abs(dd) < 1e-6) continue;
+    const t0 = (c - oo) / dd;
+    if (t0 < ta - 200 || t0 > tb + 200) continue;
+    let skip = false;
+    for (const o of diags) if (o !== d && Math.abs(W.diagSigned(o, ...P(t0))) < DIAG_W + SW * 2) skip = true;
+    if (skip) continue;
+    for (let u = -H + 5; u < H - 8; u += 11) {
+      const um = u + 3;
+      const e1 = (c + h - oo - nn * um) / dd, e2 = (c - h - oo - nn * um) / dd;
+      const hi = Math.max(e1, e2), lo = Math.min(e1, e2);
+      for (const [t1, t2] of [[hi + 8, hi + 26], [lo - 26, lo - 8]]) {
+        // полоса зебры не должна лечь на другую улицу соседнего перекрёстка
+        const [qx, qy] = P((t1 + t2) / 2, um);
+        let onRoad = false;
+        for (const [v2, c2, h2] of roads) if (Math.abs((v2 ? qx : qy) - c2) < h2 + 3) { onRoad = true; break; }
+        if (!onRoad) quad(t1, t2, u, u + 6);
+      }
+    }
+  }
+  g.fill();
   // фонари
   for (let k = Math.ceil(ta / 130); k * 130 < tb; k++) {
     const t = k * 130;
@@ -403,9 +398,7 @@ function drawDiag(g, d, R, pass, lamps, inChunk) {
     const [px, py] = P(t, s * (DIAG_W / 2 + 8));
     if (nearGridRoad(px, py) < 10) continue;
     const [lx, ly] = P(t, s * (DIAG_W / 2 - 16));
-    const l = { x: px, y: py, lx, ly, r: 140, c: 'white', i: 0.85, pole: true };
-    drawPole(g, l);
-    if (inChunk(px, py)) lamps.push(l);
+    if (inChunk(px, py)) lamps.push({ x: px, y: py, lx, ly, r: 140, c: 'white', i: 0.85, pole: true, broken: false });
   }
 }
 

@@ -1,5 +1,5 @@
-// Воксельный режим графики: тот же мир, физика и трафик, но всё строится из кубов в WebGL.
-// Земля — запечённые ночные текстуры чанков, здания/деревья/машины — объёмные блоки, неон — с bloom.
+// Воксельная графика на WebGL: город из кубов. Земля — запечённые ночные текстуры чанков,
+// здания/деревья/машины — объёмные блоки, неон — с bloom, стекло отражает окружение через кубическую камеру.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -103,40 +103,6 @@ function pixelTex(c) {
   t.generateMipmaps = false;
   return t;
 }
-// «ночной город» для отражений в зеркальных фасадах
-function cityEnv() {
-  const c = canvas(1024, 512), g = c.getContext('2d');
-  const sky = g.createLinearGradient(0, 0, 0, 256);
-  sky.addColorStop(0, '#020308'); sky.addColorStop(1, '#151b30');
-  g.fillStyle = sky; g.fillRect(0, 0, 1024, 256);
-  g.fillStyle = '#05060a'; g.fillRect(0, 256, 1024, 256);
-  let s = 777;
-  const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
-  for (let x = 0; x < 1024;) {
-    const w = 12 + rnd() * 40, h = 20 + rnd() * 140;
-    g.fillStyle = '#080a10'; g.fillRect(x, 256 - h, w, h + 2);
-    for (let yy = 256 - h + 4; yy < 254; yy += 6) for (let xx = x + 3; xx < x + w - 3; xx += 5) {
-      if (rnd() < 0.35) { g.fillStyle = rnd() < 0.7 ? '#ffcf80' : '#bfe0ff'; g.fillRect(xx, yy, 2, 2); }
-    }
-    x += w + 2;
-  }
-  // нижняя половина — «улицы внизу»: при взгляде сверху стены отражают именно её
-  for (let k = 0; k < 14; k++) {
-    const y = 262 + k * 17 + rnd() * 6;
-    g.fillStyle = `rgba(255,${(150 + rnd() * 80) | 0},90,0.35)`; g.fillRect(0, y, 1024, 2);
-  }
-  for (let k = 0; k < 40; k++) { g.fillStyle = 'rgba(200,220,255,0.3)'; g.fillRect(rnd() * 1024, 256, 2, 256); }
-  for (let k = 0; k < 900; k++) {
-    g.fillStyle = ['#ffffff', '#ffd090', '#ffb060', '#c080ff', '#60e0ff', '#ff4060', '#80ff9a'][(rnd() * 7) | 0];
-    const s2 = 2 + rnd() * 3;
-    g.fillRect(rnd() * 1024, 258 + rnd() * 250, s2, s2);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.mapping = THREE.EquirectangularReflectionMapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-
 // ---------------------------------------------------------------- модели машин
 const matCache = new Map();
 function lambert(hex) {
@@ -158,35 +124,37 @@ function part(grp, mat, x, y, z, sx, sy, sz) {
   return m;
 }
 let coneTex = null;
+// Машина собрана из частей, чтобы их можно было мять: перед / середина / зад, кабина, крыша
 function carModel(kind, color, isPlayer = false) {
   const [L, Wd] = CAR_DIM[kind] || CAR_DIM.sedan;
   const g = new THREE.Group();
-  const body = lambert(color);
+  const body = isPlayer ? new THREE.MeshLambertMaterial({ color }) : lambert(color);
   const dark = lambert('#14181e');
   const tall = kind === 'bus' || kind === 'truck';
+  const P = {};
   if (kind === 'truck') {
-    part(g, lambert(color), -L * 0.15, 17, 0, L * 0.7, 28, Wd);
-    part(g, lambert('#d8d8d0'), L * 0.36, 13, 0, L * 0.27, 20, Wd - 2);
+    P.rear = part(g, body, -L * 0.15, 17, 0, L * 0.7, 28, Wd);
+    P.front = part(g, lambert('#d8d8d0'), L * 0.36, 13, 0, L * 0.27, 20, Wd - 2);
     part(g, dark, L * 0.48, 17, 0, 2, 8, Wd - 6);
   } else if (kind === 'bus') {
-    part(g, body, 0, 16, 0, L, 26, Wd);
+    P.mid = part(g, body, 0, 16, 0, L, 26, Wd);
     part(g, glowMat('warm', 0.9), 0, 20, Wd / 2 + 0.3, L * 0.85, 6, 0.6);
     part(g, glowMat('warm', 0.9), 0, 20, -Wd / 2 - 0.3, L * 0.85, 6, 0.6);
   } else {
-    part(g, body, 0, 8, 0, L, 9, Wd);
+    const seg = L / 3;
+    P.rear = part(g, body, -seg, 8, 0, seg, 9, Wd);
+    P.mid = part(g, body, 0, 8, 0, seg + 0.2, 9, Wd);
+    P.front = part(g, body, seg, 7.5, 0, seg, 8, Wd);
     const cab = kind === 'van' ? [L * 0.75, -L * 0.08] : kind === 'hatch' ? [L * 0.55, -L * 0.1] : [L * 0.48, -L * 0.04];
-    part(g, dark, cab[1], 16, 0, cab[0], 7, Wd - 3);
-    part(g, body, cab[1], 20, 0, cab[0] - 6, 1.5, Wd - 5);
-    if (kind === 'taxi') { part(g, glowMat('yellow', 1.4), cab[1], 23, 0, 6, 3, 10); }
-    if (kind === 'police') { g.userData.bar = [part(g, glowMat('red', 3), cab[1], 22.5, -4, 4, 2.5, 7), part(g, glowMat('blue', 3), cab[1], 22.5, 4, 4, 2.5, 7)]; }
-    if (isPlayer) { part(g, lambert('#f2f2f2'), 0, 12.8, -3, L - 2, 0.6, 2); part(g, lambert('#f2f2f2'), 0, 12.8, 3, L - 2, 0.6, 2); }
+    P.cabin = part(g, dark, cab[1], 16, 0, cab[0], 7, Wd - 3);
+    P.roof = part(g, body, cab[1], 20, 0, cab[0] - 6, 1.5, Wd - 5);
+    if (kind === 'taxi') part(g, glowMat('yellow', 1.4), cab[1], 23, 0, 6, 3, 10);
+    if (kind === 'police') g.userData.bar = [part(g, glowMat('red', 3), cab[1], 22.5, -4, 4, 2.5, 7), part(g, glowMat('blue', 3), cab[1], 22.5, 4, 4, 2.5, 7)];
+    if (isPlayer) { P.stripeA = part(g, lambert('#f2f2f2'), 0, 12.6, -3, L - 2, 0.6, 2); P.stripeB = part(g, lambert('#f2f2f2'), 0, 12.6, 3, L - 2, 0.6, 2); }
   }
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) part(g, lambert('#0a0a0c'), sx * L * 0.32, 4, sz * (Wd / 2), 9, 8, 3);
-  const hy = tall ? 8 : 8;
-  part(g, glowMat('white', 2.5), L / 2 + 0.3, hy, -Wd / 2 + 4, 1, 3, 4);
-  part(g, glowMat('white', 2.5), L / 2 + 0.3, hy, Wd / 2 - 4, 1, 3, 4);
-  g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, hy, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, hy, Wd / 2 - 4, 1, 3, 4)];
-  // пятно света от фар на асфальте
+  g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+  g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
   if (!coneTex) { coneTex = new THREE.CanvasTexture(S.coneGlow); coneTex.colorSpace = THREE.SRGBColorSpace; }
   const len = isPlayer ? 300 : 190;
   const cone = new THREE.Mesh(new THREE.PlaneGeometry(len, len * 0.72), new THREE.MeshBasicMaterial({
@@ -195,8 +163,99 @@ function carModel(kind, color, isPlayer = false) {
   cone.rotation.x = -Math.PI / 2;
   cone.position.set(L / 2 + len / 2 - 4, 1.2, 0);
   g.add(cone);
-  g.userData.L = L;
+  g.userData.cone = cone;
+  g.userData.parts = P;
+  g.userData.body = body;
+  g.userData.baseColor = new THREE.Color(color);
+  g.userData.L = L; g.userData.W = Wd;
+  // исходные положения частей для модели повреждений
+  g.userData.base = new Map();
+  g.traverse((o) => { if (o !== g) g.userData.base.set(o, { p: o.position.clone(), s: o.scale.clone() }); });
   return g;
+}
+
+// Деформация по зонам повреждений игрока
+const scorch = new THREE.Color('#161414');
+function applyDamage(m, P) {
+  const { parts: Q, base, L, W: Wd } = m.userData;
+  const d = P.dmg;
+  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.set(o === m.userData.cone ? -Math.PI / 2 : 0, 0, 0); }
+  const seg = L / 3;
+  if (Q.front) {
+    const k = d.front * 0.5;
+    Q.front.scale.x *= 1 - k; Q.front.position.x -= (seg * k) / 2; Q.front.rotation.z = -0.25 * d.front; Q.front.position.y += 1.5 * d.front;
+  }
+  if (Q.rear) {
+    const k = d.rear * 0.45;
+    Q.rear.scale.x *= 1 - k; Q.rear.position.x += (seg * k) / 2; Q.rear.rotation.z = 0.2 * d.rear;
+  }
+  if (Q.mid) {
+    const side = d.left - d.right;
+    Q.mid.position.z += side * 3; Q.mid.scale.z *= 1 - 0.2 * Math.max(d.left, d.right);
+  }
+  if (Q.cabin) {
+    Q.cabin.rotation.x = (d.left - d.right) * 0.18; Q.cabin.rotation.z = (d.rear - d.front) * 0.08;
+    Q.cabin.scale.y *= 1 - 0.3 * Math.max(d.front, d.left, d.right, d.rear) * (1 - P.hp / 100);
+  }
+  if (Q.roof) { Q.roof.rotation.x = Q.cabin.rotation.x * 1.3; Q.roof.position.y -= 2 * (1 - P.hp / 100); }
+  // фары и фонари: смещаются вместе с мятым передом/задом и бьются
+  const [hl, hr] = m.userData.heads, [tl, tr] = m.userData.tail;
+  hl.position.x -= seg * d.front * 0.5; hr.position.x -= seg * d.front * 0.5;
+  tl.position.x += seg * d.rear * 0.45; tr.position.x += seg * d.rear * 0.45;
+  hl.visible = d.front < 0.4 && !P.dead; hr.visible = d.front < 0.75 && !P.dead;
+  tl.visible = d.rear < 0.45; tr.visible = d.rear < 0.8;
+  const cone = m.userData.cone;
+  cone.visible = hl.visible || hr.visible;
+  cone.material.opacity = hl.visible && hr.visible ? 0.55 : 0.3;
+  m.userData.body.color.copy(m.userData.baseColor).lerp(scorch, P.dead ? 0.92 : (1 - P.hp / 100) * 0.55);
+}
+
+// Частицы-кубики: дым, огонь, искры, обломки
+class Particles {
+  constructor(scene, max, mat) {
+    this.mesh = new THREE.InstancedMesh(unitBox, mat, max);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.frustumCulled = false;
+    this.mesh.count = 0;
+    this.max = max; this.list = [];
+    this.m = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.p = new THREE.Vector3(); this.s = new THREE.Vector3();
+    this.c = new THREE.Color();
+    scene.add(this.mesh);
+  }
+  add(o) {
+    if (this.list.length >= this.max) this.list.shift();
+    o.t = 0; o.rx = o.rx || 0; o.ry = o.ry || 0; o.spin = o.spin || 0;
+    this.list.push(o);
+  }
+  update(dt) {
+    let n = 0;
+    const out = [];
+    for (const o of this.list) {
+      o.t += dt;
+      if (o.t >= o.life) continue;
+      o.vy -= (o.g || 0) * dt;
+      const dr = Math.exp(-(o.drag || 0) * dt);
+      o.vx *= dr; o.vy *= o.g ? 1 : dr; o.vz *= dr;
+      o.x += o.vx * dt; o.y += o.vy * dt; o.z += o.vz * dt;
+      if (o.y < o.s1 / 2 && o.g) { o.y = o.s1 / 2; o.vy *= -0.35; o.vx *= 0.6; o.vz *= 0.6; o.spin *= 0.5; }
+      o.rx += o.spin * dt; o.ry += o.spin * 0.7 * dt;
+      const k = o.t / o.life;
+      const sz = o.s0 + (o.s1 - o.s0) * k;
+      this.e.set(o.rx, o.ry, 0); this.q.setFromEuler(this.e);
+      this.p.set(o.x, o.y, o.z); this.s.set(sz, sz, sz);
+      this.m.compose(this.p, this.q, this.s);
+      this.mesh.setMatrixAt(n, this.m);
+      this.c.copy(o.col);
+      if (o.fade) this.c.multiplyScalar(1 - k * 0.8);
+      this.mesh.setColorAt(n, this.c);
+      out.push(o);
+      n++;
+    }
+    this.list = out;
+    this.mesh.count = n;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  }
 }
 
 // ---------------------------------------------------------------- рендерер
@@ -222,12 +281,151 @@ export function createVoxel(cv) {
   const atlas = windowAtlas();
   const solidMat = new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0xffffff, emissiveMap: atlas, emissiveIntensity: 1.2 });
   const glowMatV = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
-  const glassMat = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 1, roughness: 0.04, envMap: cityEnv(), envMapIntensity: 2.6, map: mullionTex() });
+  // Кубическая камера на уровне улицы снимает настоящий город вокруг — его и отражают стеклянные фасады.
+  // За кадр обновляются две грани, полный оборот — за три кадра.
+  const cubeRT = new THREE.WebGLCubeRenderTarget(256, { generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+  const cubeCam = new THREE.CubeCamera(6, 4200, cubeRT);
+  scene.add(cubeCam);
+  let probeFace = -1;
+  const glassMat = new THREE.MeshPhongMaterial({
+    vertexColors: true, map: mullionTex(), envMap: cubeRT.texture, combine: THREE.MixOperation,
+    reflectivity: 0.88, shininess: 90, specular: 0x555555,
+    emissive: 0x0a1418, // слабый свет изнутри, чтобы стекло читалось и в тёмных местах
+  });
+  function updateProbe(T) {
+    cubeCam.position.set(T.x, 90, T.z);
+    cubeCam.updateMatrixWorld();
+    glassMat.visible = false;
+    const rl = rainLines.visible; rainLines.visible = false;
+    if (probeFace < 0) { cubeCam.update(renderer, scene); probeFace = 0; }
+    else {
+      const cur = renderer.getRenderTarget();
+      for (let n = 0; n < 2; n++) {
+        renderer.setRenderTarget(cubeRT, probeFace);
+        renderer.render(scene, cubeCam.children[probeFace]);
+        probeFace = (probeFace + 1) % 6;
+      }
+      renderer.setRenderTarget(cur);
+    }
+    glassMat.visible = true;
+    rainLines.visible = rl;
+  }
 
   const chunks = new Map();
   const blocks = new Map();
   const cars = new Map();
-  let playerModel = null;
+  let playerModel = null, playerGen = -1;
+  // эффекты
+  const fxSmoke = new Particles(scene, 500, new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false }));
+  const fxFire = new Particles(scene, 400, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }));
+  const fxDebris = new Particles(scene, 300, new THREE.MeshLambertMaterial({ color: 0xffffff }));
+  const flash = new THREE.PointLight(0xffa040, 0, 700, 1.2);
+  scene.add(flash);
+  let flashT = 0;
+  const fallen = [];
+  const C = (h, k = 1) => new THREE.Color(h).multiplyScalar(k);
+  const SPARK = [C('#ffd060', 3), C('#ffaa30', 3), C('#ffffff', 3)];
+  const FIRE = [C('#ff6a10', 2.2), C('#ffb020', 2.4), C('#ff3008', 2)];
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  function sparks(x, y, z, n, speed = 160) {
+    for (let k = 0; k < n; k++) {
+      const a = Math.random() * 6.283;
+      fxFire.add({ x, y, z, vx: Math.cos(a) * rnd(30, speed), vy: rnd(20, speed * 0.9), vz: Math.sin(a) * rnd(30, speed), g: 420, life: rnd(0.25, 0.7), s0: 2.2, s1: 0.6, col: SPARK[k % 3] });
+    }
+  }
+  function debris(x, z, color, n, speed = 140) {
+    const c = new THREE.Color(color);
+    for (let k = 0; k < n; k++) {
+      const a = Math.random() * 6.283;
+      fxDebris.add({ x, y: 10, z, vx: Math.cos(a) * rnd(20, speed), vy: rnd(40, speed), vz: Math.sin(a) * rnd(20, speed), g: 500, life: rnd(2.5, 4.5), s0: rnd(2, 5), s1: rnd(2, 4), col: k % 4 ? c : C('#20262e'), spin: rnd(-12, 12) });
+    }
+  }
+  function smoke(x, y, z, black, n = 1) {
+    for (let k = 0; k < n; k++) fxSmoke.add({ x: x + rnd(-4, 4), y, z: z + rnd(-4, 4), vx: rnd(-6, 6) + 25, vy: rnd(30, 55), vz: rnd(-6, 6), drag: 0.6, life: rnd(1.4, 2.6), s0: rnd(4, 7), s1: rnd(14, 26), col: black ? C('#141414') : C('#6a6e76'), fade: true, spin: rnd(-1, 1) });
+  }
+  function fire(x, y, z, n = 1, spread = 6) {
+    for (let k = 0; k < n; k++) fxFire.add({ x: x + rnd(-spread, spread), y, z: z + rnd(-spread, spread), vx: rnd(-8, 8), vy: rnd(40, 90), vz: rnd(-8, 8), drag: 1, life: rnd(0.35, 0.8), s0: rnd(5, 9), s1: 1, col: FIRE[k % 3] });
+  }
+  function doFlash(x, z, power, color = 0xffa040) { flash.position.set(x, 40, z); flash.color.set(color); flash.intensity = power; flashT = 0.6; }
+  // упавший столб
+  function dropLamp(l) {
+    const g = new THREE.Group();
+    g.position.set(l.x, 0, l.y);
+    part(g, lambert('#4a4e56'), 0, 28, 0, 3, 56, 3);
+    const ox = l.lx - l.x, oz = l.ly - l.y;
+    part(g, lambert('#2a2c30'), ox, 52.5, oz, 10, 3, 6);
+    scene.add(g);
+    const a = l.fallA || 0;
+    const axis = new THREE.Vector3(Math.sin(a), 0, -Math.cos(a)).normalize();
+    fallen.push({ g, axis, t: 0, landed: false, l });
+    sparks(l.lx, 52, l.ly, 26, 140);
+    doFlash(l.lx, l.ly, 3, 0xbfd8ff);
+    // перепекаем землю вокруг — пятно света исчезает
+    for (const [key, e] of [...chunks]) {
+      const [cx, cy] = key.split(',').map(Number);
+      const x0 = cx * CS, y0 = cy * CS;
+      if (l.lx + l.r < x0 || l.lx - l.r > x0 + CS || l.ly + l.r < y0 || l.ly - l.r > y0 + CS) continue;
+      const ch = peekChunk(cx, cy);
+      if (!ch) continue;
+      chunks.set(key, bakeChunk(ch));
+      dropChunk(e);
+    }
+  }
+  // следы шин
+  const SKID_MAX = 1700;
+  const skidPos = new Float32Array(SKID_MAX * 12);
+  const skidIdx = [];
+  for (let k = 0; k < SKID_MAX; k++) { const v = k * 4; skidIdx.push(v, v + 2, v + 1, v + 1, v + 2, v + 3); }
+  const skidGeo = new THREE.BufferGeometry();
+  skidGeo.setAttribute('position', new THREE.BufferAttribute(skidPos, 3).setUsage(THREE.DynamicDrawUsage));
+  skidGeo.setIndex(skidIdx);
+  const skidMesh = new THREE.Mesh(skidGeo, new THREE.MeshBasicMaterial({ color: 0x050505, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide }));
+  skidMesh.frustumCulled = false;
+  scene.add(skidMesh);
+  function syncSkids(st) {
+    const n = Math.min(SKID_MAX, st.skids.length);
+    const off = st.skids.length - n;
+    for (let k = 0; k < n; k++) {
+      const [x0, y0, x1, y1] = st.skids[off + k];
+      const dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy) || 1;
+      const px = (-dy / l) * 1.8, py = (dx / l) * 1.8;
+      skidPos.set([x0 + px, 0.5, y0 + py, x0 - px, 0.5, y0 - py, x1 + px, 0.5, y1 + py, x1 - px, 0.5, y1 - py], k * 12);
+    }
+    skidGeo.setDrawRange(0, n * 6);
+    skidGeo.attributes.position.needsUpdate = true;
+  }
+  function handleFx(st, dt) {
+    for (const f of st.fx) {
+      if (f.type === 'sparks') sparks(f.x, 10, f.y, f.n);
+      else if (f.type === 'debris') debris(f.x, f.y, f.color, f.n);
+      else if (f.type === 'lamp') dropLamp(f.lamp);
+      else if (f.type === 'explode') {
+        sparks(f.x, 14, f.y, 70, 260); fire(f.x, 10, f.y, 60, 22); debris(f.x, f.y, '#d8262a', 40, 220);
+        for (let k = 0; k < 20; k++) smoke(f.x, 20, f.y, true);
+        doFlash(f.x, f.y, 14);
+      }
+    }
+    st.fx.length = 0;
+    // дым и огонь из подбитого мотора
+    const P = st.player;
+    const fx = Math.cos(P.a), fy = Math.sin(P.a);
+    const ex = P.x + fx * 14, ez = P.y + fy * 14;
+    if (P.hp < 60 && Math.random() < dt * (P.dead ? 30 : (60 - P.hp) * 0.35)) smoke(ex, 16, ez, P.hp < 25);
+    if (P.hp < 22 && Math.random() < dt * (P.dead ? 60 : 18)) fire(ex, 14, ez, 1, P.dead ? 14 : 5);
+    for (const c of st.traffic) if (c.mode === 'hit' && c.hitT < 6 && Math.random() < dt * 4) smoke(c.x + Math.cos(c.a) * c.L * 0.3, 14, c.y + Math.sin(c.a) * c.L * 0.3, false);
+    fxSmoke.update(dt); fxFire.update(dt); fxDebris.update(dt);
+    if (flashT > 0) { flashT -= dt; flash.intensity *= Math.exp(-dt * 6); if (flashT <= 0) flash.intensity = 0; }
+    for (let k = fallen.length - 1; k >= 0; k--) {
+      const f = fallen[k];
+      if (f.t < 0.8) {
+        f.t += dt;
+        const th = Math.min(1, (f.t / 0.8) ** 2) * Math.PI * 0.49;
+        f.g.quaternion.setFromAxisAngle(f.axis, th);
+        if (f.t >= 0.8 && !f.landed) { f.landed = true; const a = f.l.fallA || 0; sparks(f.l.x + Math.cos(a) * 52, 3, f.l.y + Math.sin(a) * 52, 18, 120); }
+      }
+      if (Math.abs(f.g.position.x - P.x) > 3500 || Math.abs(f.g.position.z - P.y) > 3500) { scene.remove(f.g); fallen.splice(k, 1); }
+    }
+  }
 
   // пешеходы
   const MAXP = 90;
@@ -278,7 +476,7 @@ export function createVoxel(cv) {
     for (let i = W.colAt(x0 - 260); i <= W.colAt(x0 + CS + 260); i++) for (let j = W.rowAt(y0 - 260); j <= W.rowAt(y0 + CS + 260); j++) {
       for (const l of W.getBlock(i, j).lamps) lamps.add(l);
     }
-    const near = [...lamps].filter((l) => l.lx + l.r > x0 && l.lx - l.r < x0 + CS && l.ly + l.r > y0 && l.ly - l.r < y0 + CS);
+    const near = [...lamps].filter((l) => !l.broken && l.lx + l.r > x0 && l.lx - l.r < x0 + CS && l.ly + l.r > y0 && l.ly - l.r < y0 + CS);
     dg.globalCompositeOperation = 'source-over';
     dg.globalAlpha = 1;
     dg.clearRect(0, 0, TEX, TEX);
@@ -305,7 +503,11 @@ export function createVoxel(cv) {
       const x = W.roadX(i), y = W.roadY(j);
       if (W.riverDist(x, y) < 60) continue;
       const hw = W.widthX(i) / 2, hh = W.widthY(j) / 2;
-      const R = (rx, ry, rw, rh) => g.fillRect((rx - x0) * k, (ry - y0) * k, rw * k, rh * k);
+      const ds = W.diagsInRect(x - 150, y - 150, x + 150, y + 150, W.DIAG_W);
+      const R = (rx, ry, rw, rh) => {
+        for (const d of ds) if (Math.abs(W.diagSigned(d, rx + rw / 2, ry + rh / 2)) < W.DIAG_W / 2 + W.SW) return;
+        g.fillRect((rx - x0) * k, (ry - y0) * k, rw * k, rh * k);
+      };
       for (let u = -hw + 5; u < hw - 8; u += 11) { R(x + u, y - hh - 22, 6, 18); R(x + u, y + hh + 4, 6, 18); }
       for (let u = -hh + 5; u < hh - 8; u += 11) { R(x - hw - 22, y + u, 18, 6); R(x + hw + 4, y + u, 18, 6); }
     }
@@ -324,6 +526,7 @@ export function createVoxel(cv) {
     const solid = new Geo(), glow = new Geo();
     const poleC = col('#4a4e56');
     for (const l of ch.lamps) {
+      if (l.broken) continue;
       if (l.dot) { glow.cube(l.lx, 9, l.ly, 3.5, glowCol(l.c, 2.4)); continue; }
       if (!l.pole) continue;
       solid.box(l.x - 1.5, 0, l.y - 1.5, l.x + 1.5, 56, l.y + 1.5, poleC);
@@ -528,9 +731,7 @@ export function createVoxel(cv) {
     for (const c of st.traffic) {
       let m = cars.get(c);
       if (!m) {
-        const kind = c.police ? 'police' : c.spr === S.taxi ? 'taxi' : c.spr === S.bus ? 'bus' : S.trucks.includes(c.spr) ? 'truck' : 'sedan';
-        const color = kind === 'taxi' ? '#e8b81c' : kind === 'police' ? '#e8e8ee' : kind === 'bus' ? '#d0d4d8' : kind === 'truck' ? '#9aa0a8' : CAR_COLORS[(hashU(c.cruise * 1000 | 0, 3, 4)) % CAR_COLORS.length];
-        m = carModel(kind, color);
+        m = carModel(c.kind, c.color);
         scene.add(m);
         cars.set(c, m);
       }
@@ -543,7 +744,11 @@ export function createVoxel(cv) {
     }
     for (const [c, m] of cars) if (!seen.has(c)) { scene.remove(m); cars.delete(c); }
     const P = st.player;
-    if (!playerModel) { playerModel = carModel('sport', '#d8262a', true); scene.add(playerModel); }
+    if (!playerModel || playerGen !== P.gen) {
+      if (playerModel) scene.remove(playerModel);
+      playerModel = carModel('sport', '#d8262a', true); scene.add(playerModel); playerGen = P.gen;
+    }
+    applyDamage(playerModel, P);
     playerModel.position.set(P.x, 0, P.y);
     playerModel.rotation.y = -P.a;
     const tm = P.brake ? glowMat('red', 3.5) : glowMat('red', 1.2);
@@ -623,6 +828,9 @@ export function createVoxel(cv) {
       syncPeds(st);
       syncTrains(st);
       syncRain(st);
+      syncSkids(st);
+      handleFx(st, st.dt);
+      updateProbe(T);
       composer.render();
       return pending;
     },
