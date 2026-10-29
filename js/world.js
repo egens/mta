@@ -42,29 +42,61 @@ export function rowAt(y) {
 
 // ---------------------------------------------------------------- реки
 export const riverExists = (m) => hash(m, 3, 201) < 0.5;
-export function riverY(m, x) {
-  return m * RP + RP * 0.5
-    + (noise1(x * 0.00032, m * 13 + 1) - 0.5) * 1700
-    + (noise1(x * 0.0011, m * 13 + 2) - 0.5) * 260;
+// Река течёт посередине ряда кварталов (между двумя горизонтальными улицами)
+// и время от времени переходит в соседний ряд крутым изгибом посреди квартала.
+// Так она пересекает улицы только под большим углом, и на каждом пересечении стоит мост.
+const RIVER_GRP = 3;
+const riverRowOff = (m, g) => { const h = hash(g, m, 210); return h < 0.3 ? -1 : h < 0.7 ? 0 : 1; };
+const rowMid = (j) => (roadY(j) + roadY(j + 1)) / 2;
+const riverColCache = new Map();
+function riverCol(m, i) {
+  const key = m * 1000003 + i;
+  let c = riverColCache.get(key);
+  if (!c) {
+    if (riverColCache.size > 50000) riverColCache.clear();
+    const jr = rowAt(m * RP + RP * 0.5);
+    const g = Math.floor(i / RIVER_GRP);
+    const cur = rowMid(jr + riverRowOff(m, g));
+    const trans = i === g * RIVER_GRP;
+    const xa = roadX(i), xb = roadX(i + 1);
+    const pad = (xb - xa) * 0.18;
+    c = { cur, prev: trans ? rowMid(jr + riverRowOff(m, g - 1)) : cur, xa: xa + pad, span: xb - xa - 2 * pad };
+    riverColCache.set(key, c);
+  }
+  return c;
 }
-export const riverHW = (m, x) => 80 + noise1(x * 0.0006, m * 13 + 3) * 80;
+export function riverY(m, x) {
+  const c = riverCol(m, colAt(x));
+  let y = c.cur;
+  if (c.prev !== c.cur) {
+    const t = clamp((x - c.xa) / c.span, 0, 1);
+    y = c.prev + (c.cur - c.prev) * t * t * (3 - 2 * t);
+  }
+  return y + (noise1(x * 0.004, m * 13 + 2) - 0.5) * 36;
+}
+export const riverHW = (m, x) => 85 + noise1(x * 0.0006, m * 13 + 3) * 65;
+const riverSlope = (m, x) => (riverY(m, x + 6) - riverY(m, x - 6)) / 12;
+// половина толщины реки по вертикали (на крутых участках она больше нормальной ширины)
+export function riverHV(m, x) {
+  const s = riverSlope(m, x);
+  return riverHW(m, x) * Math.sqrt(1 + s * s);
+}
 // расстояние до берега (отрицательное — в воде)
 export function riverDist(x, y) {
   const m = Math.floor(y / RP);
   if (!riverExists(m)) return 1e9;
   const dy = y - riverY(m, x);
   if (Math.abs(dy) > 1400) return 1e9;
-  const s = (riverY(m, x + 6) - riverY(m, x - 6)) / 12;
+  const s = riverSlope(m, x);
   return Math.abs(dy) / Math.sqrt(1 + s * s) - riverHW(m, x);
 }
-export const bridgeAt = (i, m) => aveX(i) || hash(i, m, 202) < 0.3;
 
 // диапазон y, который занимает река m в полосе [xa, xb]
 export function riverSpan(m, xa, xb) {
   let lo = Infinity, hi = -Infinity;
   for (let x = xa; x <= xb + 0.1; x += Math.max(4, (xb - xa) / 6)) {
-    const ry = riverY(m, x), hw = riverHW(m, x);
-    lo = Math.min(lo, ry - hw); hi = Math.max(hi, ry + hw);
+    const ry = riverY(m, x), hv = riverHV(m, x);
+    lo = Math.min(lo, ry - hv); hi = Math.max(hi, ry + hv);
   }
   return [lo, hi];
 }
@@ -114,11 +146,10 @@ export function railsInRange(x0, x1) {
 
 // ---------------------------------------------------------------- вода и мосты
 export function onBridge(x, y) {
-  const i = colAt(x);
-  const m = Math.floor(y / RP);
-  for (const ii of [i, i + 1]) {
-    if (Math.abs(x - roadX(ii)) < widthX(ii) / 2 + 12 && bridgeAt(ii, m)) return true;
-  }
+  // каждая улица, пересекающая реку, идёт по мосту
+  const i = colAt(x), j = rowAt(y);
+  for (const ii of [i, i + 1]) if (Math.abs(x - roadX(ii)) < widthX(ii) / 2 + 12) return true;
+  for (const jj of [j, j + 1]) if (Math.abs(y - roadY(jj)) < widthY(jj) / 2 + 12) return true;
   for (const d of diagsInRect(x, y, x, y, DIAG_W)) {
     if (Math.abs(diagSigned(d, x, y)) < DIAG_W / 2 + SW) return true;
   }
@@ -136,40 +167,9 @@ export function isWater(x, y) {
 }
 
 // ---------------------------------------------------------------- граф для трафика
-const segCache = new Map();
-function memo(key, fn) {
-  let v = segCache.get(key);
-  if (v === undefined) {
-    if (segCache.size > 20000) segCache.clear();
-    v = fn();
-    segCache.set(key, v);
-  }
-  return v;
-}
-// отрезок (i,j) -> (i+1,j)
-export function hSegExists(i, j) {
-  return memo('h' + i + ',' + j, () => {
-    const y = roadY(j);
-    const m = Math.floor(y / RP);
-    if (!riverExists(m)) return true;
-    const xa = roadX(i), xb = roadX(i + 1);
-    for (let x = xa; x <= xb; x += 30) if (riverDist(x, y) < widthY(j) / 2 + 12) return false;
-    return true;
-  });
-}
-// отрезок (i,j) -> (i,j+1)
-export function vSegExists(i, j) {
-  return memo('v' + i + ',' + j, () => {
-    const x = roadX(i), ya = roadY(j), yb = roadY(j + 1);
-    const w = widthX(i) / 2;
-    for (let m = Math.floor((ya - 400) / RP); m <= Math.floor((yb + 400) / RP); m++) {
-      if (!riverExists(m)) continue;
-      const [lo, hi] = riverSpan(m, x - w, x + w);
-      if (hi + 10 > ya && lo - 10 < yb && !bridgeAt(i, m)) return false;
-    }
-    return true;
-  });
-}
+// Все улицы непрерывны: реки пересекаются по мостам.
+export const hSegExists = () => true;
+export const vSegExists = () => true;
 
 // ---------------------------------------------------------------- зоны и районы
 export function zoneAt(x, y) {
@@ -365,7 +365,7 @@ const STYLE = {
     if (b.height > 260) {
       for (const [px, py] of corners(b, 6)) b.glows.push({ x: px, y: py, r: 22, c: 'red', i: 0.9, blink: 1.2 });
     }
-    if (r() < 0.28) { b.glass = r.pick(['green', 'green', 'cyan', 'purple']); b.lit = 0; }
+    if (r() < 0.45) { b.glass = r.pick(['green', 'silver', 'silver', 'cyan', 'purple']); b.lit = 0; }
     else if (r() < 0.15) b.crown = r.pick(NEON);
     if (r() < 0.12) b.details.push({ t: 'r', x: b.x + b.w * 0.2, y: b.y + b.h * 0.2, w: b.w * 0.6, h: b.h * 0.35, c: '#17241a' });
   },
@@ -373,7 +373,8 @@ const STYLE = {
     b.lit = r.range(0.2, 0.5); b.floorMode = true; b.floorH = 18;
     b.details.push({ t: 'rs', x: b.x + 4, y: b.y + 4, w: b.w - 8, h: b.h - 8, c: '#0f1013', lw: 2 });
     roofBoxes(b, r, r.int(2, 5));
-    if (r() < 0.12) b.crown = r.pick(NEON);
+    if (r() < 0.35) { b.glass = r.pick(['silver', 'silver', 'green', 'cyan']); b.lit = 0; }
+    else if (r() < 0.12) b.crown = r.pick(NEON);
   },
   resid(b, r) {
     b.lit = r.range(0.2, 0.5); b.floorH = 20;
@@ -422,7 +423,7 @@ const STYLE = {
   canopy(b) { b.roof = '#d0d0cc'; b.wall = '#30302e'; b.lit = 0; b.floorH = b.height;
     b.details.push({ t: 'rs', x: b.x + 2, y: b.y + 2, w: b.w - 4, h: b.h - 4, c: '#e8402a', lw: 4 });
   },
-  shop(b, r) { b.lit = 0.55; b.floorH = 22; roofBoxes(b, r, r.int(1, 3)); if (r() < 0.15) b.crown = r.pick(NEON); },
+  shop(b, r) { b.lit = 0.55; b.floorH = 22; roofBoxes(b, r, r.int(1, 3)); if (r() < 0.12) { b.glass = r.pick(['silver', 'cyan']); b.lit = 0; } else if (r() < 0.15) b.crown = r.pick(NEON); },
   stall(b, r) { b.roof = r.pick(['#8a3a3a', '#3a6a8a', '#8a7a3a', '#3a8a5a', '#7a3a7a']); b.lit = 0; b.floorH = b.height;
     b.details.push({ t: 'r', x: b.x, y: b.cy - 0.75, w: b.w, h: 1.5, c: 'rgba(255,255,255,0.35)' });
   },
@@ -752,7 +753,7 @@ const LAYOUT = {
         const pts = [];
         const lampPts = [];
         for (let x = B.lx0; x <= B.lx1; x += 12) {
-          const ry = riverY(m, x), hw = riverHW(m, x);
+          const ry = riverY(m, x), hw = riverHV(m, x);
           const y = ry + side * (hw + 30);
           if (y > B.ly0 + 8 && y < B.ly1 - 8) { pts.push(x, y); if (Math.round(x - B.lx0) % 96 < 12) lampPts.push([x, ry + side * (hw + 14)]); }
           else if (pts.length) { op(B, { t: 'l', pts: pts.slice(), c: PAL.paving, lw: 24 }); pts.length = 0; }

@@ -9,6 +9,13 @@ const MAX_CHUNKS = 96;
 const TAU = Math.PI * 2;
 const cache = new Map();
 let tick = 0;
+// в воксельном режиме деревья, машины и столбы строятся в 3D, на земле их не рисуем
+let flatObjects = true;
+export function setChunkObjects(on) {
+  if (flatObjects === on) return;
+  flatObjects = on;
+  cache.clear();
+}
 
 export function chunkKey(cx, cy) { return cx + ',' + cy; }
 export function peekChunk(cx, cy) {
@@ -56,10 +63,10 @@ function buildChunk(cx, cy) {
   for (const i of rails) { g.fillStyle = PAL.gravel; g.fillRect(W.railX(i) - RAIL_W / 2, y0 - 2, RAIL_W, CS + 4); }
   drawGridRoads(g, R, i0, i1, j0, j1);
   drawRivers(g, R);
-  drawBridges(g, R, i0, i1, lamps, inChunk);
+  drawBridges(g, R, i0, i1, j0, j1, lamps, inChunk);
   for (const d of diags) drawDiag(g, d, R, 'road', lamps, inChunk);
   for (const i of rails) drawRailTracks(g, W.railX(i), R, j0, j1);
-  for (const B of blocks) drawBlockObjects(g, B);
+  if (flatObjects) for (const B of blocks) drawBlockObjects(g, B);
   for (const B of blocks) for (const l of B.lamps) {
     if (l.pole) drawPole(g, l);
     if (inChunk(l.x, l.y)) lamps.push(l);
@@ -180,6 +187,7 @@ function drawExcavator(g, p) {
 }
 
 function drawPole(g, l) {
+  if (!flatObjects) return;
   if (l.lx !== l.x || l.ly !== l.y) {
     g.strokeStyle = '#5c5e62'; g.lineWidth = 1.6;
     g.beginPath(); g.moveTo(l.x, l.y); g.lineTo(l.x + (l.lx - l.x) * 0.85, l.y + (l.ly - l.y) * 0.85); g.stroke();
@@ -247,7 +255,7 @@ function drawRivers(g, R) {
     const xs = [], tops = [], bots = [];
     let any = false;
     for (let x = R.x0 - 32; x <= R.x1 + 32; x += 16) {
-      const ry = W.riverY(m, x), hw = W.riverHW(m, x);
+      const ry = W.riverY(m, x), hw = W.riverHV(m, x);
       xs.push(x); tops.push(ry - hw); bots.push(ry + hw);
       if (ry + hw + 20 > R.y0 && ry - hw - 20 < R.y1) any = true;
     }
@@ -289,32 +297,60 @@ function drawRivers(g, R) {
   }
 }
 
-function drawBridges(g, R, i0, i1, lamps, inChunk) {
+function drawBridges(g, R, i0, i1, j0, j1, lamps, inChunk) {
+  // вертикальные улицы
   for (let i = i0; i <= i1 + 1; i++) {
     const x = W.roadX(i), w = W.widthX(i);
     const dw = w + 28;
     if (x + dw / 2 + 30 < R.x0 || x - dw / 2 - 30 > R.x1) continue;
     for (let m = Math.floor((R.y0 - 1500) / RP); m <= Math.floor((R.y1 + 1500) / RP); m++) {
-      if (!W.riverExists(m) || !W.bridgeAt(i, m)) continue;
+      if (!W.riverExists(m)) continue;
       const [lo, hi] = W.riverSpan(m, x - dw / 2, x + dw / 2);
-      const ya = lo - 24, yb = hi + 24;
-      if (yb < R.y0 - 40 || ya > R.y1 + 40) continue;
-      g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillRect(x - dw / 2 + 12, ya + 10, dw, yb - ya);
-      g.fillStyle = PAL.sidewalk; g.fillRect(x - dw / 2, ya, dw, yb - ya);
-      g.fillStyle = PAL.asphalt; g.fillRect(x - w / 2, ya, w, yb - ya);
-      g.fillStyle = PAL.mark;
-      if (W.aveX(i)) { g.fillRect(x - 3, ya, 2, yb - ya); g.fillRect(x + 1, ya, 2, yb - ya); }
-      else for (let v = Math.ceil(ya / 40) * 40; v < yb - 20; v += 40) g.fillRect(x - 1, v, 2, 20);
-      g.fillStyle = '#a4a6aa';
-      g.fillRect(x - dw / 2, ya, 3, yb - ya); g.fillRect(x + dw / 2 - 3, ya, 3, yb - ya);
-      for (let v = ya; v < yb; v += 18) { g.fillRect(x - dw / 2 - 1, v, 5, 3); g.fillRect(x + dw / 2 - 4, v, 5, 3); }
-      for (let v = Math.ceil(ya / 110) * 110, k = 0; v < yb - 10; v += 110, k++) {
-        const s = (Math.round(v / 110) % 2) ? -1 : 1;
-        const l = { x: x + s * (dw / 2 - 6), y: v, lx: x + s * (w / 2 - 12), ly: v, r: 140, c: 'white', i: 0.85, pole: true };
-        drawPole(g, l);
-        if (inChunk(l.x, l.y)) lamps.push(l);
+      const a = lo - 24, b = hi + 24;
+      if (b < R.y0 - 40 || a > R.y1 + 40) continue;
+      bridgeDeck(g, true, x, w, W.aveX(i), a, b, lamps, inChunk);
+    }
+  }
+  // горизонтальные улицы: ищем участки над водой
+  for (let j = j0; j <= j1 + 1; j++) {
+    const y = W.roadY(j), w = W.widthY(j);
+    const dw = w + 28;
+    if (y + dw / 2 + 30 < R.y0 || y - dw / 2 - 30 > R.y1) continue;
+    let s0 = null;
+    const x0 = Math.floor((R.x0 - 300) / 8) * 8;
+    for (let x = x0; x <= R.x1 + 300; x += 8) {
+      const wet = W.riverDist(x, y - dw / 2) < 14 || W.riverDist(x, y) < 14 || W.riverDist(x, y + dw / 2) < 14;
+      if (wet && s0 === null) s0 = x;
+      if ((!wet || x + 8 > R.x1 + 300) && s0 !== null) {
+        bridgeDeck(g, false, y, w, W.aveY(j), s0 - 24, x + 24, lamps, inChunk);
+        s0 = null;
       }
     }
+  }
+}
+
+// пролёт моста: c — ось улицы, a..b — участок вдоль неё
+function bridgeDeck(g, vert, c, w, ave, a, b, lamps, inChunk) {
+  const dw = w + 28;
+  const F = (u, v, du, dv) => (vert ? g.fillRect(c + u, v, du, dv) : g.fillRect(v, c + u, dv, du));
+  g.fillStyle = 'rgba(0,0,0,0.5)';
+  if (vert) g.fillRect(c - dw / 2 + 12, a + 10, dw, b - a); else g.fillRect(a + 12, c - dw / 2 + 10, b - a, dw);
+  g.fillStyle = PAL.sidewalk; F(-dw / 2, a, dw, b - a);
+  g.fillStyle = PAL.asphalt; F(-w / 2, a, w, b - a);
+  g.fillStyle = PAL.mark;
+  if (ave) { F(-3, a, 2, b - a); F(1, a, 2, b - a); }
+  else for (let v = Math.ceil(a / 40) * 40; v < b - 20; v += 40) F(-1, v, 2, 20);
+  g.fillStyle = '#a4a6aa';
+  F(-dw / 2, a, 3, b - a); F(dw / 2 - 3, a, 3, b - a);
+  for (let v = Math.ceil(a / 18) * 18; v < b; v += 18) { F(-dw / 2 - 1, v, 5, 3); F(dw / 2 - 4, v, 5, 3); }
+  for (let v = Math.ceil(a / 110) * 110; v < b - 10; v += 110) {
+    const s = (Math.round(v / 110) % 2) ? -1 : 1;
+    const l = vert
+      ? { x: c + s * (dw / 2 - 6), y: v, lx: c + s * (w / 2 - 12), ly: v }
+      : { x: v, y: c + s * (dw / 2 - 6), lx: v, ly: c + s * (w / 2 - 12) };
+    Object.assign(l, { r: 140, c: 'white', i: 0.85, pole: true });
+    drawPole(g, l);
+    if (inChunk(l.x, l.y)) lamps.push(l);
   }
 }
 

@@ -65,7 +65,7 @@ export function initSprites() {
   S.player = carSprite('sport', '#d8262a');
 }
 
-const CAR_COLORS = ['#b8322b', '#2b5cb8', '#dcdcdc', '#25272b', '#7a7f86', '#2e7d4f', '#c9a227', '#6b2d8a',
+export const CAR_COLORS = ['#b8322b', '#2b5cb8', '#dcdcdc', '#25272b', '#7a7f86', '#2e7d4f', '#c9a227', '#6b2d8a',
   '#b86b2b', '#1f3f6b', '#8a1f1f', '#c8c8c8', '#3a4a5a', '#5a2a2a', '#2a6a7a', '#e0d8c0'];
 
 export const CAR_DIM = { sedan: [46, 22], hatch: [40, 21], van: [52, 24], taxi: [46, 22], police: [48, 22], truck: [84, 26], bus: [104, 28], sport: [48, 23] };

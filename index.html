@@ -11,7 +11,11 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: #e8e8f0;
     font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif; touch-action: none; user-select: none; -webkit-user-select: none; }
-  canvas#game { position: fixed; inset: 0; display: block; }
+  canvas#game, canvas#gl { position: fixed; inset: 0; display: block; }
+  #modes { position: fixed; top: 228px; right: 18px; display: flex; gap: 6px; }
+  #modes button { font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: .08em; color: #fff; background: rgba(20,24,40,0.6);
+    border: 1px solid rgba(255,210,122,0.5); border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+  #modes button.off { opacity: .45; }
   .hidden { display: none !important; }
 
   #minimap { position: fixed; top: 16px; right: 16px; border-radius: 50%; border: 2px solid rgba(255,210,122,0.6);
@@ -53,18 +57,20 @@
   .tb[data-k=left] { left: 18px; } .tb[data-k=right] { left: 104px; }
   .tb[data-k=up] { right: 18px; bottom: 112px; } .tb[data-k=down] { right: 104px; }
   .tb[data-k=hand] { right: 18px; width: 74px; height: 74px; font-size: 14px; }
-  body.touch #speedo { bottom: auto; top: 230px; right: 18px; }
+  body.touch #speedo { bottom: auto; top: 270px; right: 18px; }
   body.touch #speed { font-size: 40px; }
   @media (max-width: 600px) { #district { font-size: 18px; max-width: 50vw; } }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
+<canvas id="gl" class="hidden"></canvas>
+<div id="modes"><button id="gfxbtn" title="V — сменить графику">2D</button><button id="rainbtn" title="T — дождь">☂</button></div>
 <canvas id="minimap"></canvas>
 <div id="district"></div>
 <div id="speedo"><div id="speed">0</div><small>КМ/Ч</small><div id="odo"></div></div>
 <div id="toast"></div>
-<div id="hint">H — управление · M — звук · R — на дорогу</div>
+<div id="hint">H — управление · V — воксели/2D · T — дождь · M — звук</div>
 <div id="stats" class="hidden"></div>
 <div id="help" class="hidden">
   <div><b>W / ↑</b> газ</div>
@@ -73,6 +79,8 @@
   <div><b>Пробел</b> ручник, дрифт</div>
   <div><b>E</b> гудок</div>
   <div><b>R</b> вернуться на дорогу</div>
+  <div><b>V</b> графика: 2D / воксели</div>
+  <div><b>T</b> дождь вкл/выкл</div>
   <div><b>M</b> звук вкл/выкл</div>
 </div>
 <div id="touch">
@@ -89,6 +97,7 @@
   <div class="go">НАЖМИТЕ ЛЮБУЮ КЛАВИШУ</div>
 </div>
 <div id="loading">Строим город…</div>
+<script type="importmap">{ "imports": { "three": "./js/vendor/three.module.min.js", "three/addons/": "./js/vendor/addons/" } }</script>
 <script type="module" src="js/main.js"></script>
 </body>
 </html>

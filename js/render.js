@@ -3,6 +3,7 @@ import * as W from './world.js';
 import { CS, peekChunk, buildChunkAt, nextTick } from './chunks.js';
 import { S, drawCarSprite, LIGHT_RGB } from './sprites.js';
 import { hashU } from './util.js';
+import { rain, drawRain2D } from './rain.js';
 
 const AMBIENT = 'rgba(1,2,8,0.93)';
 const LIGHT_SCALE = 0.5;
@@ -144,6 +145,15 @@ export function drawFrame(ctx, st) {
     ctx.globalAlpha = Math.min(1, k * (l.c === 'sodium' ? 0.2 : l.c === 'white' ? 0.09 : 0.24));
     const rr = l.r * 0.95;
     ctx.drawImage(spr, l.lx - rr, l.ly - rr, rr * 2, rr * 2);
+    if (rain.k > 0.02 && l.r > 90) {
+      // отражение фонаря на мокром асфальте — вытянутый блик в сторону камеры
+      const dx = cam.x - l.lx, dy = cam.y - l.ly;
+      ctx.save();
+      ctx.translate(l.lx, l.ly); ctx.rotate(Math.atan2(dy, dx));
+      ctx.globalAlpha = 0.3 * rain.k * k;
+      ctx.drawImage(spr, -10, -9, 110, 18);
+      ctx.restore();
+    }
     if (l.pole) {
       ctx.globalAlpha = 1;
       ctx.drawImage(S.dot[l.c] || S.dot.white, l.lx - 7, l.ly - 7, 14, 14);
@@ -196,6 +206,7 @@ export function drawFrame(ctx, st) {
   ctx.globalCompositeOperation = 'source-over';
 
   // ---------- здания
+  takeSnapshot(ctx, Wd, Ht);
   drawBuildings(ctx, st, v);
 
   // ---------- верхний слой: дым
@@ -206,6 +217,7 @@ export function drawFrame(ctx, st) {
     ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalAlpha = 1;
+  drawRain2D(ctx, st, cameraHeight(cam, Ht));
 }
 
 function neighbourChunks(v) {
@@ -367,7 +379,24 @@ function drawBuildings(ctx, st, v) {
     if (b.skeleton) { drawSkeletonRoof(ctx, R, b, cam, z, f, cx, cy); continue; }
     ctx.beginPath();
     ctx.moveTo(R[0][0], R[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(R[k][0], R[k][1]); ctx.closePath();
-    ctx.fillStyle = b.roof; ctx.fill();
+    ctx.fillStyle = b.glass ? GLASS[b.glass][0] : b.roof; ctx.fill();
+    if (b.glass) {
+      ctx.fillStyle = GLASS[b.glass][2]; ctx.fill();
+      // стеклянная крыша: блик и панели
+      const sg = ctx.createLinearGradient(R[0][0], R[0][1], R[2][0], R[2][1]);
+      sg.addColorStop(0, 'rgba(255,255,255,0.0)'); sg.addColorStop(0.45, 'rgba(255,255,255,0.0)');
+      sg.addColorStop(0.5, 'rgba(255,255,255,0.13)'); sg.addColorStop(0.58, 'rgba(255,255,255,0.0)');
+      ctx.fillStyle = sg; ctx.fill();
+      ctx.strokeStyle = GLASS[b.glass][1]; ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      for (let t = 1; t < 6; t++) {
+        const p = bil(R[0], R[1], R[3], R[2], t / 6, 0), q = bil(R[0], R[1], R[3], R[2], t / 6, 1);
+        ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]);
+        const p2 = bil(R[0], R[3], R[1], R[2], t / 6, 0), q2 = bil(R[0], R[3], R[1], R[2], t / 6, 1);
+        ctx.moveTo(p2[0], p2[1]); ctx.lineTo(q2[0], q2[1]);
+      }
+      ctx.stroke();
+    }
     ctx.strokeStyle = b.glass ? GLASS[b.glass][1] : 'rgba(255,255,255,0.06)'; ctx.lineWidth = b.glass ? 1.6 : 1; ctx.stroke();
     const zf = z * f;
     ctx.setTransform(zf, 0, 0, zf, cx - cam.x * zf, cy - cam.y * zf);
@@ -434,28 +463,67 @@ function bil(b0, b1, r0, r1, s, t) {
 }
 const WIN_COL = { warm: '#e0b46a', cool: '#a9cbe8', tv: '#5a78e0' };
 const GLASS = {
-  green: ['#0d2619', 'rgba(150,255,170,0.5)', 'rgba(150,255,170,0.12)'],
-  cyan: ['#0b2029', 'rgba(140,225,255,0.5)', 'rgba(140,225,255,0.12)'],
-  purple: ['#1a1029', 'rgba(205,150,255,0.45)', 'rgba(205,150,255,0.12)'],
+  green: ['#0d2619', 'rgba(150,255,170,0.35)', 'rgba(60,200,110,0.16)'],
+  cyan: ['#0b2029', 'rgba(140,225,255,0.35)', 'rgba(60,170,220,0.16)'],
+  purple: ['#1a1029', 'rgba(205,150,255,0.32)', 'rgba(150,80,220,0.16)'],
+  silver: ['#10151d', 'rgba(200,220,255,0.28)', 'rgba(150,180,230,0.10)'],
 };
+let snapCv = null, snapG = null, snapW = 0, snapH = 0;
+// снимок кадра до зданий — источник отражений в зеркальных фасадах
+function takeSnapshot(ctx, Wd, Ht) {
+  if (!snapCv || snapCv.width !== Math.ceil(Wd / 2) || snapCv.height !== Math.ceil(Ht / 2)) {
+    snapCv = document.createElement('canvas');
+    snapCv.width = Math.ceil(Wd / 2); snapCv.height = Math.ceil(Ht / 2);
+    snapG = snapCv.getContext('2d');
+  }
+  snapW = Wd; snapH = Ht;
+  snapG.setTransform(1, 0, 0, 1, 0, 0);
+  snapG.drawImage(ctx.canvas, 0, 0, snapCv.width, snapCv.height);
+}
 // стеклянный фасад с вертикальными световыми полосами
+// Зеркальный фасад: отражаем улицу перед зданием относительно линии основания стены
 function drawGlassFace(ctx, b0, b1, r0, r1, b, face) {
   const [base, strip, haze] = GLASS[b.glass];
-  ctx.fillStyle = base;
-  ctx.beginPath();
-  ctx.moveTo(b0[0], b0[1]); ctx.lineTo(b1[0], b1[1]); ctx.lineTo(r1[0], r1[1]); ctx.lineTo(r0[0], r0[1]);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = haze; ctx.fill();
+  const quad = () => {
+    ctx.beginPath();
+    ctx.moveTo(b0[0], b0[1]); ctx.lineTo(b1[0], b1[1]); ctx.lineTo(r1[0], r1[1]); ctx.lineTo(r0[0], r0[1]);
+    ctx.closePath();
+  };
+  quad();
+  ctx.fillStyle = base; ctx.fill();
   const wpx = Math.hypot(b1[0] - b0[0], b1[1] - b0[1]);
-  const cols = Math.min(40, Math.max(2, Math.floor(wpx / 5)));
-  ctx.strokeStyle = strip; ctx.lineWidth = 1.2;
+  const hpx = Math.hypot(r0[0] - b0[0], r0[1] - b0[1]);
+  if (snapCv && wpx > 2 && hpx > 3) {
+    const ux = (b1[0] - b0[0]) / wpx, uy = (b1[1] - b0[1]) / wpx;
+    const a = 2 * ux * ux - 1, bb = 2 * ux * uy, d = 2 * uy * uy - 1;
+    const e = b0[0] - (a * b0[0] + bb * b0[1]), f = b0[1] - (bb * b0[0] + d * b0[1]);
+    ctx.save();
+    quad(); ctx.clip();
+    ctx.setTransform(a, bb, bb, d, e, f);
+    ctx.globalAlpha = 0.9;
+    ctx.drawImage(snapCv, 0, 0, snapW, snapH);
+    // усиливаем отражённые огни, чтобы стекло читалось как зеркало
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.45;
+    ctx.drawImage(snapCv, 0, 0, snapW, snapH);
+    ctx.restore();
+    quad();
+  }
+  ctx.fillStyle = haze; ctx.fill();
+  // блик по диагонали
+  const g = ctx.createLinearGradient(b0[0], b0[1], r1[0], r1[1]);
+  g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.55, 'rgba(255,255,255,0)');
+  g.addColorStop(0.62, 'rgba(255,255,255,0.10)'); g.addColorStop(0.7, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fill();
+  // стыки стеклопакетов
+  const cols = Math.min(30, Math.max(2, Math.floor(wpx / 9)));
+  ctx.strokeStyle = strip; ctx.lineWidth = 1;
   ctx.beginPath();
   for (let c = 1; c < cols; c++) {
     const p = bil(b0, b1, r0, r1, c / cols, 0), q = bil(b0, b1, r0, r1, c / cols, 1);
     ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]);
   }
   ctx.stroke();
-  // яркие точки вдоль ребра крыши
   ctx.fillStyle = '#ffffff';
   const n = Math.max(2, Math.floor(wpx / 14));
   for (let c = 0; c <= n; c++) {

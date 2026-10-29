@@ -4,9 +4,12 @@ import { drawFrame, ensureChunks, setupLights } from './render.js';
 import { createPlayer, updatePlayer, collideStatic, collideCars, MAX_SPEED } from './car.js';
 import { updateTraffic, updatePeds, updateTrains } from './traffic.js';
 import { clamp, lerp } from './util.js';
+import { rain, updateRain } from './rain.js';
+import { setChunkObjects } from './chunks.js';
 
 const cv = document.getElementById('game');
 const ctx = cv.getContext('2d', { alpha: false });
+const glCv = document.getElementById('gl');
 const mini = document.getElementById('minimap');
 const mctx = mini.getContext('2d');
 const hudSpeed = document.getElementById('speed');
@@ -18,6 +21,40 @@ const hudStats = document.getElementById('stats');
 initSprites();
 
 let DPR = 1;
+// ---------------------------------------------------------------- режимы графики
+let gfx = 'flat';
+let vox = null, voxFirst = false, voxLoading = false;
+async function setGfx(mode) {
+  if (mode === 'voxel' && !vox) {
+    if (voxLoading) return;
+    voxLoading = true;
+    try {
+      const m = await import('./voxel.js');
+      vox = m.createVoxel(glCv);
+      vox.resize(st.W, st.H);
+    } catch (e) {
+      console.error(e);
+      voxLoading = false;
+      toast('Воксельный режим недоступен: нет WebGL');
+      return;
+    }
+    voxLoading = false;
+  }
+  gfx = mode;
+  setChunkObjects(mode !== 'voxel');
+  voxFirst = true;
+  glCv.classList.toggle('hidden', mode !== 'voxel');
+  cv.classList.toggle('hidden', mode === 'voxel');
+  try { localStorage.setItem('gfx', mode); } catch (e) { /* приватный режим */ }
+  const b = document.getElementById('gfxbtn');
+  if (b) b.textContent = mode === 'voxel' ? 'ВОКСЕЛИ' : '2D';
+}
+function toggleRain() {
+  rain.on = !rain.on;
+  toast(rain.on ? 'Дождь' : 'Ясно');
+  const b = document.getElementById('rainbtn');
+  if (b) b.classList.toggle('off', !rain.on);
+}
 const st = {
   cam: { x: 0, y: 0, z: 1 }, W: 0, H: 0, time: 0, viewR: 1000,
   player: null, traffic: [], peds: [], trains: [], skids: [], smoke: [], particles: [],
@@ -76,6 +113,9 @@ function resize() {
   st.H = cv.height = Math.round(h * DPR);
   cv.style.width = w + 'px'; cv.style.height = h + 'px';
   setupLights(st.W, st.H);
+  glCv.width = st.W; glCv.height = st.H;
+  glCv.style.width = w + 'px'; glCv.style.height = h + 'px';
+  if (vox) vox.resize(st.W, st.H);
   const ms = Math.round(Math.min(200, Math.max(120, Math.min(w, h) * 0.26)));
   mini.width = mini.height = Math.round(ms * DPR);
   mini.style.width = mini.style.height = ms + 'px';
@@ -94,6 +134,8 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyM') audio.toggle();
   if (e.code === 'KeyR') respawn();
   if (e.code === 'KeyE') audio.horn(true);
+  if (e.code === 'KeyV' && !e.repeat) setGfx(gfx === 'voxel' ? 'flat' : 'voxel');
+  if (e.code === 'KeyT' && !e.repeat) toggleRain();
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
   hideIntro();
 });
@@ -111,6 +153,8 @@ for (const el of document.querySelectorAll('[data-k]')) {
 }
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) document.body.classList.add('touch');
 document.getElementById('intro').addEventListener('click', () => { audio.start(); hideIntro(); });
+document.getElementById('gfxbtn').addEventListener('click', (e) => { e.stopPropagation(); setGfx(gfx === 'voxel' ? 'flat' : 'voxel'); });
+document.getElementById('rainbtn').addEventListener('click', (e) => { e.stopPropagation(); toggleRain(); });
 function hideIntro() { document.getElementById('intro').classList.add('hidden'); }
 
 function readInput() {
@@ -167,6 +211,20 @@ const audio = (() => {
       n.connect(f); f.connect(g); g.connect(ac.destination);
       n.start();
     },
+    rain(k) {
+      if (!ac) return;
+      if (!this.rn) {
+        const len = ac.sampleRate * 2;
+        const buf = ac.createBuffer(1, len, ac.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+        const src = ac.createBufferSource(); src.buffer = buf; src.loop = true;
+        const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 2500; f.Q.value = 0.4;
+        this.rn = ac.createGain(); this.rn.gain.value = 0;
+        src.connect(f); f.connect(this.rn); this.rn.connect(ac.destination); src.start();
+      }
+      this.rn.gain.setTargetAtTime(muted ? 0 : 0.05 * k, ac.currentTime, 0.3);
+    },
     horn(on) { if (ac && hornG) hornG.gain.setTargetAtTime(on && !muted ? 0.08 : 0, ac.currentTime, 0.02); },
     toggle() { muted = !muted; toast(muted ? 'Звук выключен' : 'Звук включен'); },
   };
@@ -199,8 +257,8 @@ function drawMinimap() {
   for (let mm = Math.floor((y0 - 1500) / W.RP); mm <= Math.floor((y1 + 1500) / W.RP); mm++) {
     if (!W.riverExists(mm)) continue;
     m.beginPath();
-    for (let x = x0 - 50; x <= x1 + 50; x += 60) m.lineTo(x, W.riverY(mm, x) - W.riverHW(mm, x));
-    for (let x = x1 + 50; x >= x0 - 50; x -= 60) m.lineTo(x, W.riverY(mm, x) + W.riverHW(mm, x));
+    for (let x = x0 - 50; x <= x1 + 50; x += 60) m.lineTo(x, W.riverY(mm, x) - W.riverHV(mm, x));
+    for (let x = x1 + 50; x >= x0 - 50; x -= 60) m.lineTo(x, W.riverY(mm, x) + W.riverHV(mm, x));
     m.closePath(); m.fillStyle = '#1a4a6a'; m.fill();
   }
   // ж/д
@@ -229,8 +287,8 @@ function drawMinimap() {
   for (let mm = Math.floor((y0 - 1500) / W.RP); mm <= Math.floor((y1 + 1500) / W.RP); mm++) {
     if (!W.riverExists(mm)) continue;
     m.beginPath();
-    for (let x = x0 - 50; x <= x1 + 50; x += 60) m.lineTo(x, W.riverY(mm, x) - W.riverHW(mm, x));
-    for (let x = x1 + 50; x >= x0 - 50; x -= 60) m.lineTo(x, W.riverY(mm, x) + W.riverHW(mm, x));
+    for (let x = x0 - 50; x <= x1 + 50; x += 60) m.lineTo(x, W.riverY(mm, x) - W.riverHV(mm, x));
+    for (let x = x1 + 50; x >= x0 - 50; x -= 60) m.lineTo(x, W.riverY(mm, x) + W.riverHV(mm, x));
     m.closePath(); m.fillStyle = 'rgba(26,74,106,0.75)'; m.fill();
   }
   // машины
@@ -294,11 +352,18 @@ function loop(now) {
   st.smoke = st.smoke.filter((p) => p.life > 0);
   if (st.smoke.length > 300) st.smoke.splice(0, st.smoke.length - 300);
 
-  // подгрузка чанков: первые кадры — без ограничений
-  const pending = ensureChunks(st.cam, st.W, st.H, frame < 3 ? 200 : 3, { x: P.vx * 0.8, y: P.vy * 0.8 });
+  updateRain(st, dt);
+  let pending;
+  if (gfx === 'voxel' && vox) {
+    st.viewR = Math.max(st.viewR, 2000);
+    pending = vox.render({ ...st, cam: camDraw }, voxFirst);
+    voxFirst = false;
+  } else {
+    // подгрузка чанков: первые кадры — без ограничений
+    pending = ensureChunks(st.cam, st.W, st.H, frame < 3 ? 200 : 3, { x: P.vx * 0.8, y: P.vy * 0.8 });
+    drawFrame(ctx, { ...st, cam: camDraw });
+  }
   hudLoad.classList.toggle('hidden', frame > 2);
-
-  drawFrame(ctx, { ...st, cam: camDraw });
 
   // HUD
   const kmh = Math.round((speed / 10) * 3.6);
@@ -312,6 +377,7 @@ function loop(now) {
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) hudToast.classList.remove('show'); }
   if (frame % 3 === 0) drawMinimap();
   audio.update(speed, inp.up);
+  audio.rain(rain.k);
 
   fpsN++; fpsT += dt;
   if (fpsT > 0.5) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; }
@@ -321,5 +387,10 @@ function loop(now) {
 
   requestAnimationFrame(loop);
 }
+let startGfx = 'flat';
+try { startGfx = localStorage.getItem('gfx') || 'flat'; } catch (e) { /* приватный режим */ }
+const qg = new URLSearchParams(location.search).get('gfx');
+if (qg) startGfx = qg;
+if (startGfx === 'voxel') setGfx('voxel');
 requestAnimationFrame(loop);
 window.game = st;
