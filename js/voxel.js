@@ -915,6 +915,13 @@ export function createVoxel(cv) {
     for (const [key, e] of chunks) if (!want.has(key)) { dropChunk(e); chunks.delete(key); }
     need.sort((a, b) => a[2] - b[2]);
     let left = budget, waiting = 0;
+    // догрузились реки/парки — перепекаем уже показанные куски (по одному за кадр)
+    for (const [key, e] of chunks) {
+      if (e.epoch === OSM.groundEpoch) continue;
+      const ne = e.rebake();
+      if (ne) { chunks.set(key, ne); dropChunk(e); }
+      break;
+    }
     for (const [gx, gy] of need) {
       if (left <= 0) { waiting++; continue; }
       const e = bakeOSM(gx, gy);
@@ -927,7 +934,9 @@ export function createVoxel(cv) {
     for (const t of OSM.tilesIn(T.x - BLOCK_R, T.z - BLOCK_R * 1.25, T.x + BLOCK_R, T.z + BLOCK_R * 0.55)) {
       const key = 't' + t.tx + ',' + t.ty;
       bwant.add(key);
-      if (!blocks.has(key) && left-- > 0) blocks.set(key, buildOSMTile(t));
+      const old = blocks.get(key);
+      if (old && old.ver !== (t.ver || 0) && left-- > 0) { dropBlock(old); blocks.delete(key); }
+      if (!blocks.has(key) && left-- > 0) { const e = buildOSMTile(t); e.ver = t.ver || 0; blocks.set(key, e); }
     }
     for (const [key, e] of blocks) if (!bwant.has(key)) { dropBlock(e); blocks.delete(key); }
     return waiting;
@@ -938,6 +947,7 @@ export function createVoxel(cv) {
     const all = OSM.groundLampsAround(ch.x0 - 200, ch.y0 - 200, ch.x0 + ch.size + 200, ch.y0 + ch.size + 200);
     const e = bakeGround(ch.canvas, ch.x0, ch.y0, ch.size, 512, all, ch.lamps, null);
     OSM.releaseGround(ch);
+    e.epoch = OSM.groundEpoch;
     e.rebake = () => bakeOSM(gx, gy);
     return e;
   }

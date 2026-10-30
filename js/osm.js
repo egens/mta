@@ -27,59 +27,99 @@ const TILE = 6000;        // 600 м
 const GC = 1500;          // кусок земли для текстуры (150 м)
 const BIN = 1500;         // ячейка пространственного индекса
 const ENDPOINTS = [
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ];
-const CACHE = 'mta-osm-v1';
+const CACHE = 'mta-osm-v2';
+const REQ_TIMEOUT = 60000;
 
 const tiles = new Map();  // ключ -> { tx, ty, state, buildings, trees, signals }
 const queue = [];
 let active = 0, endpoint = 0;
-export const status = { loading: 0, errors: 0, lastError: '' };
+export const status = { loading: 0, errors: 0, lastError: '', current: '', tilesReady: 0, since: 0 };
 
 function bboxOf(tx, ty) {
   const [n, w] = unproject(tx * TILE, ty * TILE);
   const [s, e] = unproject((tx + 1) * TILE, (ty + 1) * TILE);
   return [s, w, n, e].map((v) => v.toFixed(6)).join(',');
 }
+// Пути и точки — с геометрией. Отношения (мультиполигоны рек, парков) бывают огромными
+// и повторяются в каждом куске, поэтому здесь берём только их id, а геометрию — отдельно и один раз.
 function query(b) {
-  return `[out:json][timeout:90];(
-way["building"](${b});relation["building"]["type"="multipolygon"](${b});
+  return `[out:json][timeout:50];(
+way["building"](${b});
 way["highway"](${b});
-way["natural"~"^(water|wood|scrub|grassland|wetland)$"](${b});relation["natural"~"^(water|wood)$"](${b});
-way["waterway"~"^(riverbank|river|canal|stream|dock)$"](${b});relation["waterway"="riverbank"](${b});
+way["natural"~"^(water|wood|scrub|grassland|wetland)$"](${b});
+way["waterway"~"^(riverbank|river|canal|stream|dock)$"](${b});
 way["landuse"~"^(grass|forest|meadow|recreation_ground|village_green|cemetery|construction|railway|industrial|garages|allotments|flowerbed)$"](${b});
-relation["landuse"~"^(grass|forest|recreation_ground|cemetery)$"](${b});
-way["leisure"~"^(park|garden|pitch|playground|stadium|track|sports_centre)$"](${b});relation["leisure"~"^(park|garden|stadium)$"](${b});
+way["leisure"~"^(park|garden|pitch|playground|stadium|track|sports_centre)$"](${b});
 way["amenity"="parking"](${b});
 way["railway"~"^(rail|tram|light_rail|subway|narrow_gauge)$"](${b});
 node["natural"="tree"](${b});node["highway"="traffic_signals"](${b});node["place"~"^(suburb|quarter|neighbourhood)$"](${b});
-);out geom;`;
+);out geom;
+(relation["building"]["type"="multipolygon"](${b});relation["natural"~"^(water|wood)$"](${b});relation["waterway"="riverbank"](${b});
+relation["landuse"~"^(grass|forest|recreation_ground|cemetery)$"](${b});relation["leisure"~"^(park|garden|stadium)$"](${b}););out tags;`;
 }
 
-async function fetchTile(t) {
-  const key = `https://mta-osm.local/tile/${t.tx}_${t.ty}`;
-  let cache = null;
-  try { cache = await caches.open(CACHE); const hit = await cache.match(key); if (hit) return await hit.json(); } catch (e) { /* без кэша */ }
-  const body = 'data=' + encodeURIComponent(query(bboxOf(t.tx, t.ty)));
+const host = (u) => u.replace(/^https:\/\//, '').split('/')[0];
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+// запрос к Overpass с таймаутом и перебором зеркал
+async function overpass(q, what) {
   let lastErr = null;
   for (let attempt = 0; attempt < ENDPOINTS.length * 2; attempt++) {
     const url = ENDPOINTS[endpoint % ENDPOINTS.length];
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQ_TIMEOUT);
+    status.current = `${what}: ${host(url)}`;
+    status.since = performance.now();
     try {
-      const r = await fetch(url, { method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const r = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: ctrl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status + (r.status === 429 ? ' (сервер перегружен)' : r.status === 504 ? ' (таймаут сервера)' : ''));
       const txt = await r.text();
-      const json = JSON.parse(txt);
-      if (cache) cache.put(key, new Response(txt, { headers: { 'Content-Type': 'application/json' } })).catch(() => {});
-      return json;
+      let json;
+      try { json = JSON.parse(txt); } catch (e) { throw new Error('ответ не JSON'); }
+      if (json.remark && /error/i.test(json.remark) && !(json.elements || []).length) throw new Error(json.remark.slice(0, 100));
+      return { json, txt };
     } catch (e) {
-      lastErr = e;
+      lastErr = e.name === 'AbortError' ? new Error('нет ответа ' + REQ_TIMEOUT / 1000 + ' с') : e.message === 'Failed to fetch' || e.name === 'TypeError' ? new Error('сеть/CORS') : e;
+      status.lastError = `${host(url)}: ${lastErr.message}`;
+      console.warn('[OSM]', what, status.lastError);
       endpoint++;
-      await new Promise((res) => setTimeout(res, 800 + attempt * 700));
-    }
+      await sleep(600 + attempt * 500);
+    } finally { clearTimeout(timer); }
   }
   throw lastErr;
+}
+async function cached(key, q, what) {
+  let cache = null;
+  try { cache = await caches.open(CACHE); const hit = await cache.match(key); if (hit) return await hit.json(); } catch (e) { cache = null; }
+  const { json, txt } = await overpass(q, what);
+  if (cache) cache.put(key, new Response(txt, { headers: { 'Content-Type': 'application/json' } })).catch(() => {});
+  return json;
+}
+
+function fetchTile(t) {
+  return cached(`https://mta-osm.local/tile/${t.tx}_${t.ty}`, query(bboxOf(t.tx, t.ty)), `кусок ${t.tx},${t.ty}`);
+}
+
+// геометрия новых отношений — одним запросом и один раз на всю игру
+const relWanted = new Set(), relLoaded = new Set();
+async function loadRelations(t, ids) {
+  const fresh = ids.filter((id) => !relWanted.has(id));
+  if (!fresh.length) return;
+  for (const id of fresh) relWanted.add(id);
+  for (let i = 0; i < fresh.length; i += 40) {
+    const part = fresh.slice(i, i + 40);
+    try {
+      const json = await cached(`https://mta-osm.local/rel/${part.join('_')}`, `[out:json][timeout:60];rel(id:${part.join(',')});out geom;`, 'реки и парки');
+      ingestRelations(t, json.elements || []);
+      for (const id of part) relLoaded.add(id);
+    } catch (e) {
+      for (const id of part) relWanted.delete(id);
+    }
+  }
 }
 
 function pump() {
@@ -87,10 +127,15 @@ function pump() {
     queue.sort((a, b) => a.prio - b.prio);
     const t = queue.shift();
     active++; status.loading++;
-    fetchTile(t).then((json) => { ingest(t, json); t.state = 'ready'; }).catch((e) => {
-      t.state = 'error'; status.errors++; status.lastError = String(e && e.message || e);
-      setTimeout(() => { t.state = 'new'; }, 8000);
-    }).finally(() => { active--; status.loading--; pump(); });
+    fetchTile(t).then((json) => {
+      const rels = ingest(t, json);
+      t.state = 'ready'; status.tilesReady++; status.errors = 0;
+      if (rels.length) loadRelations(t, rels);
+    }).catch((e) => {
+      t.state = 'error'; status.errors++; status.lastError = status.lastError || String(e && e.message || e);
+      console.warn('[OSM] кусок не загружен', t.tx, t.ty, e);
+      setTimeout(() => { t.state = 'new'; }, 6000);
+    }).finally(() => { active--; status.loading--; status.current = ''; pump(); });
   }
 }
 
@@ -199,7 +244,7 @@ function closeRing(pts) {
 }
 // склейка кусков мультиполигона в кольца
 function assemble(members) {
-  const segs = members.filter((m) => m.geometry && m.geometry.length > 1).map((m) => m.geometry.map((g) => [g.lat, g.lon]));
+  const segs = members.filter((m) => m.type === 'way' && m.geometry).map((m) => m.geometry.filter(Boolean).map((g) => [g.lat, g.lon])).filter((g) => g.length > 1);
   const key = (p) => p[0].toFixed(7) + ',' + p[1].toFixed(7);
   const rings = [];
   while (segs.length) {
@@ -341,23 +386,41 @@ function ingest(t, json) {
     signalIds.add(e.id);
     const n = graph.get(e.id); if (n) n.signal = true;
   }
+  const rels = [];
   for (const e of els) {
+    try { ingestOne(t, e, rels); } catch (err) { console.warn('[OSM] пропущен элемент', e.type, e.id, err); }
+  }
+  scatterTrees(t);
+  return rels;
+}
+
+function ingestRelations(t, els) {
+  for (const e of els) {
+    if (e.type !== 'relation' || !e.members) continue;
+    try { ingestOne(tiles.get(Math.floor(t.tx) + ',' + Math.floor(t.ty)) || t, e, null); } catch (err) { console.warn('[OSM] пропущено отношение', e.id, err); }
+  }
+  // здания-мультиполигоны принадлежат куску по центру, остальное (вода, парки) — общее
+  for (const tt of tiles.values()) if (tt.state === 'ready') scatterTrees(tt);
+  markDirty();
+}
+
+function ingestOne(t, e, rels) {
     const tags = e.tags || {};
     if (e.type === 'node') {
-      if (seenNodes.has(e.id)) continue;
+      if (seenNodes.has(e.id)) return;
       seenNodes.add(e.id);
       const [x, y] = project(e.lat, e.lon);
-      if (Math.floor(x / TILE) !== t.tx || Math.floor(y / TILE) !== t.ty) { seenNodes.delete(e.id); continue; }
+      if (Math.floor(x / TILE) !== t.tx || Math.floor(y / TILE) !== t.ty) { seenNodes.delete(e.id); return; }
       if (tags.natural === 'tree') t.trees.push({ x, y, r: 16 + hash(e.id % 1000003, 2) * 10, kind: hash(e.id % 1000003, 3) < 0.2 ? 1 : 0, v: e.id % 4 });
       else if (tags.highway === 'traffic_signals') t.signals.push({ x, y, id: e.id });
       else if (tags.place && tags.name) binAdd('places', { x, y, name: tags.name }, x, y, x, y);
-      continue;
+      return;
     }
     if (e.type === 'way') {
-      if (tags.building) { if (e.geometry) addBuilding(t, [closeRing(geomPts(e.geometry))], tags, e.id); continue; }
-      if (seenWays.has(e.id)) continue;
+      if (tags.building) { if (e.geometry) addBuilding(t, [closeRing(geomPts(e.geometry))], tags, e.id); return; }
+      if (seenWays.has(e.id)) return;
       seenWays.add(e.id);
-      if (!e.geometry) continue;
+      if (!e.geometry) return;
       if (tags.highway) addRoad(e);
       else if (tags.natural === 'water' || tags.waterway === 'riverbank' || tags.waterway === 'dock') addWater([closeRing(geomPts(e.geometry))], e.id);
       else if (tags.waterway) {
@@ -365,36 +428,59 @@ function ingest(t, json) {
         const w = tags.waterway === 'river' ? 0 : tags.waterway === 'canal' ? 80 : 30;
         if (w) binAdd('rails', { pts, water: true, w, id: e.id }, bb.x0 - w, bb.y0 - w, bb.x1 + w, bb.y1 + w);
       } else if (tags.railway) {
-        if (tags.tunnel && tags.tunnel !== 'no') continue;
+        if (tags.tunnel && tags.tunnel !== 'no') return;
         const pts = geomPts(e.geometry), bb = bboxPts(pts);
         binAdd('rails', { pts, tram: tags.railway === 'tram', bridge: !!tags.bridge, id: e.id }, bb.x0 - 40, bb.y0 - 40, bb.x1 + 40, bb.y1 + 40);
       } else addArea([closeRing(geomPts(e.geometry))], tags, e.id);
-      continue;
+      return;
     }
     if (e.type === 'relation') {
-      if (tags.building) { addBuilding(t, assemble(e.members.filter((m) => m.role === 'outer')).concat(assemble(e.members.filter((m) => m.role === 'inner'))), tags, e.id); continue; }
-      if (seenRels.has(e.id)) continue;
+      // в запросе куска у отношений нет геометрии — запомним id и догрузим отдельно
+      if (!e.members) { if (rels && !relLoaded.has(e.id)) rels.push(e.id); return; }
+      if (tags.building) {
+        const rings = assemble(e.members.filter((m) => m.role === 'outer')).concat(assemble(e.members.filter((m) => m.role === 'inner')));
+        if (rings[0]) {
+          const bb = bboxPts(rings[0]);
+          const owner = tiles.get(Math.floor((bb.x0 + bb.x1) / 2 / TILE) + ',' + Math.floor((bb.y0 + bb.y1) / 2 / TILE));
+          if (owner && owner.state === 'ready' && !owner.relB?.has(e.id)) { (owner.relB ||= new Set()).add(e.id); addBuilding(owner, rings, tags, e.id); owner.coll = null; owner.ver = (owner.ver || 0) + 1; }
+        }
+        return;
+      }
+      if (seenRels.has(e.id)) return;
       seenRels.add(e.id);
-      const rings = assemble(e.members || []);
+      const rings = assemble(e.members);
       if (tags.natural === 'water' || tags.waterway === 'riverbank') addWater(rings, e.id);
       else addArea(rings, tags, e.id);
     }
-  }
-  // деревья в парках и лесах (если их нет в OSM)
-  for (const a of binQuery('areas', t.tx * TILE, t.ty * TILE, (t.tx + 1) * TILE, (t.ty + 1) * TILE)) {
-    if (!a.green || a.scattered) continue;
-    a.scattered = true;
+}
+
+// деревья в парках и лесах (в OSM их обычно нет): сажаем в пределах куска, детерминированно
+function scatterTrees(t) {
+  const X0 = t.tx * TILE, Y0 = t.ty * TILE, X1 = X0 + TILE, Y1 = Y0 + TILE;
+  let added = false;
+  for (const a of binQuery('areas', X0, Y0, X1, Y1)) {
+    if (!a.green) continue;
+    const key = t.tx + ',' + t.ty;
+    if ((a.done ||= new Set()).has(key)) continue;
+    a.done.add(key);
+    const x0 = Math.max(X0, a.bb.x0), y0 = Math.max(Y0, a.bb.y0), x1 = Math.min(X1, a.bb.x1), y1 = Math.min(Y1, a.bb.y1);
+    if (x1 <= x0 || y1 <= y0) continue;
     const dense = a.kind === 'forest' || a.kind === 'wood' ? 1 / 9000 : 1 / 26000;
-    const ar = Math.abs(signedArea(a.rings[0]));
-    const n = Math.min(400, Math.floor(ar * dense));
-    for (let k = 0; k < n * 2 && k < 800; k++) {
-      const x = a.bb.x0 + hash(a.id % 1000003, k, 11) * (a.bb.x1 - a.bb.x0), y = a.bb.y0 + hash(a.id % 1000003, k, 12) * (a.bb.y1 - a.bb.y0);
+    const n = Math.min(300, Math.floor((x1 - x0) * (y1 - y0) * dense));
+    const sid = (a.id + t.tx * 7919 + t.ty * 104729) % 1000003;
+    for (let k = 0; k < n; k++) {
+      const x = x0 + hash(sid, k, 11) * (x1 - x0), y = y0 + hash(sid, k, 12) * (y1 - y0);
       if (!pointInRings(a.rings, x, y) || nearRoad(x, y, 30)) continue;
-      const tt = tiles.get(Math.floor(x / TILE) + ',' + Math.floor(y / TILE)) || t;
-      tt.trees.push({ x, y, r: 14 + hash(a.id % 1000003, k, 13) * 14, kind: a.kind === 'forest' || a.kind === 'wood' ? (hash(k, 4) < 0.5 ? 1 : 0) : (hash(k, 5) < 0.15 ? 1 : 0), v: k % 4 });
+      t.trees.push({ x, y, r: 14 + hash(sid, k, 13) * 14, kind: a.kind === 'forest' || a.kind === 'wood' ? (hash(k, 4) < 0.5 ? 1 : 0) : (hash(k, 5) < 0.15 ? 1 : 0), v: k % 4 });
+      added = true;
     }
   }
+  if (added) { t.coll = null; t.ver = (t.ver || 0) + 1; }
 }
+
+// после догрузки рек и парков текстуры земли нужно перерисовать
+export let groundEpoch = 0;
+function markDirty() { groundEpoch++; for (const ch of groundCache.values()) ch.canvas = null; }
 
 // ---------------------------------------------------------------- запросы для игры
 function distSeg(px, py, ax, ay, bx, by) {

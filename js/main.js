@@ -347,9 +347,10 @@ function loop(now) {
     // ждём данные OSM вокруг точки старта
     OSM.requestAround(P.x, P.y);
     const sp = OSM.tileReady(P.x, P.y) && osmSpot(P.x, P.y);
-    hudLoad.textContent = OSM.status.errors && !OSM.status.loading
-      ? `Не удаётся загрузить карту OpenStreetMap (${OSM.status.lastError}). Пробуем снова…`
-      : `Загружаем карту Москвы из OpenStreetMap… ${OSM.PLACES[atIdx][0]}`;
+    const os = OSM.status;
+    const wait = os.current ? ` · ${os.current}, ${((performance.now() - os.since) / 1000) | 0} с` : '';
+    hudLoad.textContent = `Загружаем карту Москвы из OpenStreetMap — ${OSM.PLACES[atIdx][0]}${wait}`
+      + (os.lastError ? ` · последняя ошибка: ${os.lastError}` : '');
     if (sp) { [P.x, P.y, P.a] = sp; st.cam.x = P.x; st.cam.y = P.y; osmWaiting = false; }
   } else for (let k = 0; k < n; k++) step(dt / n);
   if (!MOSCOW) updateTrains(st);
