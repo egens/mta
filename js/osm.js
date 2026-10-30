@@ -1,7 +1,9 @@
 // Москва из OpenStreetMap в натуральную величину (1 м = 10 единиц).
-// Данные грузятся в браузере через Overpass API кусками 600×600 м вокруг машины,
-// кэшируются в Cache Storage и превращаются в здания, дороги, воду, зелень, фонари и граф для трафика.
+// Основной источник — векторные тайлы OpenFreeMap (CDN, без ключа, масштаб 14 ≈ 1,4 км);
+// если он недоступен — Overpass API кусками 600×600 м. Всё кэшируется в Cache Storage
+// и превращается в здания, дороги, воду, зелень, фонари и граф для трафика.
 import { hash, hashU } from './util.js';
+import { VectorTile, Pbf } from './vendor/vt.js';
 
 // ---------------------------------------------------------------- проекция
 export const ORIGIN = { lat: 55.7539, lon: 37.6208 }; // Красная площадь
@@ -103,6 +105,31 @@ async function cached(key, q, what) {
 function fetchTile(t) {
   return cached(`https://mta-osm.local/tile/${t.tx}_${t.ty}`, query(bboxOf(t.tx, t.ty)), `кусок ${t.tx},${t.ty}`);
 }
+// векторный тайл z14 с CDN (кэш браузера и Cache Storage)
+async function fetchVT(t) {
+  const url = VT_URL.replace('{z}', Z).replace('{x}', t.tx).replace('{y}', t.ty);
+  let cache = null;
+  try { cache = await caches.open(CACHE); const hit = await cache.match(url); if (hit) return await hit.arrayBuffer(); } catch (e) { cache = null; }
+  status.current = `тайл ${t.tx},${t.ty}: tiles.openfreemap.org`;
+  status.since = performance.now();
+  let last = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const buf = await r.arrayBuffer();
+      if (cache) cache.put(url, new Response(buf.slice(0))).catch(() => {});
+      return buf;
+    } catch (e) {
+      last = e.name === 'AbortError' ? new Error('нет ответа 30 с') : e.name === 'TypeError' ? new Error('сеть/CORS') : e;
+      status.lastError = 'tiles.openfreemap.org: ' + last.message;
+      await sleep(800 + attempt * 1200);
+    } finally { clearTimeout(timer); }
+  }
+  throw last;
+}
 
 // геометрия новых отношений — одним запросом и один раз на всю игру
 const relWanted = new Set(), relLoaded = new Set();
@@ -127,8 +154,7 @@ function pump() {
     queue.sort((a, b) => a.prio - b.prio);
     const t = queue.shift();
     active++; status.loading++;
-    fetchTile(t).then((json) => {
-      const rels = ingest(t, json);
+    (SRC === 'vt' ? fetchVT(t).then((buf) => { ingestVT(t, buf); return []; }) : fetchTile(t).then((json) => ingest(t, json))).then((rels) => {
       t.state = 'ready'; status.tilesReady++; status.errors = 0;
       if (rels.length) loadRelations(t, rels);
     }).catch((e) => {
@@ -139,35 +165,87 @@ function pump() {
   }
 }
 
+// ---------------------------------------------------------------- тайлы: два источника
+let SRC = null;          // 'vt' — векторные тайлы, 'op' — Overpass
+let detecting = false;
+const Z = 14, NZ = 2 ** Z;
+const lon2tx = (lon) => Math.floor(((lon + 180) / 360) * NZ);
+const lat2ty = (lat) => { const r = (lat * Math.PI) / 180; return Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * NZ); };
+const tx2lon = (tx) => (tx / NZ) * 360 - 180;
+const ty2lat = (ty) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * ty) / NZ))) * 180) / Math.PI;
+function tileOf(x, y) {
+  if (SRC === 'vt') { const [lat, lon] = unproject(x, y); return [lon2tx(lon), lat2ty(lat)]; }
+  return [Math.floor(x / TILE), Math.floor(y / TILE)];
+}
+function tileRect(tx, ty) {
+  if (SRC === 'vt') {
+    const [x0, y0] = project(ty2lat(ty), tx2lon(tx)), [x1, y1] = project(ty2lat(ty + 1), tx2lon(tx + 1));
+    return { x0, y0, x1, y1 };
+  }
+  return { x0: tx * TILE, y0: ty * TILE, x1: (tx + 1) * TILE, y1: (ty + 1) * TILE };
+}
+const sameTile = (t, x, y) => { const [a, b] = tileOf(x, y); return a === t.tx && b === t.ty; };
+
+// выбор источника: пробуем CDN векторных тайлов, иначе Overpass
+let VT_URL = null;
+async function detect() {
+  detecting = true;
+  status.current = 'векторные тайлы: tiles.openfreemap.org';
+  status.since = performance.now();
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    const r = await fetch('https://tiles.openfreemap.org/planet', { signal: ctrl.signal });
+    clearTimeout(timer);
+    const tj = await r.json();
+    VT_URL = tj.tiles[0];
+    SRC = 'vt';
+  } catch (e) {
+    console.warn('[OSM] векторные тайлы недоступны, переходим на Overpass', e);
+    status.lastError = 'tiles.openfreemap.org: ' + (e.name === 'AbortError' ? 'нет ответа' : 'сеть/CORS');
+    SRC = 'op';
+  }
+  status.current = '';
+  detecting = false;
+}
+
 // подгрузка кусков вокруг точки (и по ходу движения)
 export function requestAround(x, y, vx = 0, vy = 0) {
+  if (!SRC) { if (!detecting) detect(); return; }
   const ax = x + vx * 2, ay = y + vy * 2;
   for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
     for (const [px, py] of [[x, y], [ax, ay]]) {
-      const tx = Math.floor(px / TILE) + dx, ty = Math.floor(py / TILE) + dy;
+      const [bx, by] = tileOf(px, py);
+      const tx = bx + dx, ty = by + dy;
       const key = tx + ',' + ty;
       let t = tiles.get(key);
-      if (!t) { t = { tx, ty, state: 'new', buildings: [], trees: [], signals: [] }; tiles.set(key, t); }
-      if (t.state === 'new') {
-        t.state = 'queued';
-        t.prio = Math.hypot((tx + 0.5) * TILE - x, (ty + 0.5) * TILE - y);
-        queue.push(t);
-      } else if (t.state === 'queued') t.prio = Math.hypot((tx + 0.5) * TILE - x, (ty + 0.5) * TILE - y);
+      if (!t) { t = { tx, ty, state: 'new', buildings: [], trees: [], signals: [], rect: tileRect(tx, ty) }; tiles.set(key, t); }
+      const prio = Math.hypot((t.rect.x0 + t.rect.x1) / 2 - x, (t.rect.y0 + t.rect.y1) / 2 - y);
+      if (t.state === 'new') { t.state = 'queued'; t.prio = prio; queue.push(t); }
+      else if (t.state === 'queued') t.prio = prio;
     }
   }
   pump();
 }
-export const tileReady = (x, y) => { const t = tiles.get(Math.floor(x / TILE) + ',' + Math.floor(y / TILE)); return !!t && t.state === 'ready'; };
+export const tileReady = (x, y) => { if (!SRC) return false; const [tx, ty] = tileOf(x, y); const t = tiles.get(tx + ',' + ty); return !!t && t.state === 'ready'; };
+function tileRange(x0, y0, x1, y1) {
+  const [a, b] = tileOf(x0, y0), [c, d] = tileOf(x1, y1);
+  return [Math.min(a, c), Math.min(b, d), Math.max(a, c), Math.max(b, d)];
+}
 export function tilesIn(x0, y0, x1, y1) {
   const out = [];
-  for (let tx = Math.floor(x0 / TILE); tx <= Math.floor(x1 / TILE); tx++) for (let ty = Math.floor(y0 / TILE); ty <= Math.floor(y1 / TILE); ty++) {
+  if (!SRC) return out;
+  const [a, b, c, d] = tileRange(x0, y0, x1, y1);
+  for (let tx = a; tx <= c; tx++) for (let ty = b; ty <= d; ty++) {
     const t = tiles.get(tx + ',' + ty);
     if (t && t.state === 'ready') out.push(t);
   }
   return out;
 }
 const areaReady = (x0, y0, x1, y1) => {
-  for (let tx = Math.floor(x0 / TILE); tx <= Math.floor(x1 / TILE); tx++) for (let ty = Math.floor(y0 / TILE); ty <= Math.floor(y1 / TILE); ty++) {
+  if (!SRC) return false;
+  const [a, b, c, d] = tileRange(x0, y0, x1, y1);
+  for (let tx = a; tx <= c; tx++) for (let ty = b; ty <= d; ty++) {
     const t = tiles.get(tx + ',' + ty);
     if (!t || t.state !== 'ready') return false;
   }
@@ -287,7 +365,7 @@ function addBuilding(t, rings, tags, id) {
   const bb = bboxPts(outer);
   const cx = (bb.x0 + bb.x1) / 2, cy = (bb.y0 + bb.y1) / 2;
   // здание принадлежит куску, в котором его центр
-  if (Math.floor(cx / TILE) !== t.tx || Math.floor(cy / TILE) !== t.ty) return;
+  if (!sameTile(t, cx, cy)) return;
   const h = levelsHeight(tags, id) * U;
   const minH = tags.min_height ? parseFloat(tags.min_height) * U : 0;
   // нормали рёбер наружу (для выталкивания машины)
@@ -327,6 +405,7 @@ function addRoad(w) {
     for (let k = 0; k < w.nodes.length; k++) {
       const id = w.nodes[k];
       let n = graph.get(id);
+      if (k > 0 && id === w.nodes[k - 1]) continue;
       if (!n) {
         n = { id, x: pts[k * 2], y: pts[k * 2 + 1], adj: new Map(), signal: signalIds.has(id) };
         graph.set(id, n);
@@ -410,7 +489,7 @@ function ingestOne(t, e, rels) {
       if (seenNodes.has(e.id)) return;
       seenNodes.add(e.id);
       const [x, y] = project(e.lat, e.lon);
-      if (Math.floor(x / TILE) !== t.tx || Math.floor(y / TILE) !== t.ty) { seenNodes.delete(e.id); return; }
+      if (!sameTile(t, x, y)) { seenNodes.delete(e.id); return; }
       if (tags.natural === 'tree') t.trees.push({ x, y, r: 16 + hash(e.id % 1000003, 2) * 10, kind: hash(e.id % 1000003, 3) < 0.2 ? 1 : 0, v: e.id % 4 });
       else if (tags.highway === 'traffic_signals') t.signals.push({ x, y, id: e.id });
       else if (tags.place && tags.name) binAdd('places', { x, y, name: tags.name }, x, y, x, y);
@@ -441,7 +520,7 @@ function ingestOne(t, e, rels) {
         const rings = assemble(e.members.filter((m) => m.role === 'outer')).concat(assemble(e.members.filter((m) => m.role === 'inner')));
         if (rings[0]) {
           const bb = bboxPts(rings[0]);
-          const owner = tiles.get(Math.floor((bb.x0 + bb.x1) / 2 / TILE) + ',' + Math.floor((bb.y0 + bb.y1) / 2 / TILE));
+          const owner = tiles.get(tileOf((bb.x0 + bb.x1) / 2, (bb.y0 + bb.y1) / 2).join(','));
           if (owner && owner.state === 'ready' && !owner.relB?.has(e.id)) { (owner.relB ||= new Set()).add(e.id); addBuilding(owner, rings, tags, e.id); owner.coll = null; owner.ver = (owner.ver || 0) + 1; }
         }
         return;
@@ -456,7 +535,7 @@ function ingestOne(t, e, rels) {
 
 // деревья в парках и лесах (в OSM их обычно нет): сажаем в пределах куска, детерминированно
 function scatterTrees(t) {
-  const X0 = t.tx * TILE, Y0 = t.ty * TILE, X1 = X0 + TILE, Y1 = Y0 + TILE;
+  const { x0: X0, y0: Y0, x1: X1, y1: Y1 } = t.rect;
   let added = false;
   for (const a of binQuery('areas', X0, Y0, X1, Y1)) {
     if (!a.green) continue;
@@ -481,6 +560,159 @@ function scatterTrees(t) {
 // после догрузки рек и парков текстуры земли нужно перерисовать
 export let groundEpoch = 0;
 function markDirty() { groundEpoch++; for (const ch of groundCache.values()) ch.canvas = null; }
+
+// ---------------------------------------------------------------- векторные тайлы (схема OpenMapTiles)
+// узлы графа склеиваем по близости: на стыках тайлов координаты чуть расходятся
+const snap = new Map();
+let nodeSeq = 1e12;
+function nodeAt(x, y) {
+  const cx = Math.floor(x / 8), cy = Math.floor(y / 8);
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+    const l = snap.get((cx + a) + ',' + (cy + b));
+    if (l) for (const n of l) if (Math.abs(n.x - x) < 6 && Math.abs(n.y - y) < 6) return n.id;
+  }
+  const n = { id: nodeSeq++, x, y, adj: new Map(), signal: false };
+  graph.set(n.id, n);
+  binAdd('nodes', n, x, y, x, y);
+  const k = cx + ',' + cy;
+  (snap.get(k) || snap.set(k, []).get(k)).push(n);
+  return n.id;
+}
+// обрезка по прямоугольнику тайла (в градусах)
+function clipRing(ring, w, s, e, n) {
+  let pts = ring;
+  const edges = [[(p) => p[0] >= w, (a, b) => [w, a[1] + ((b[1] - a[1]) * (w - a[0])) / (b[0] - a[0])]],
+    [(p) => p[0] <= e, (a, b) => [e, a[1] + ((b[1] - a[1]) * (e - a[0])) / (b[0] - a[0])]],
+    [(p) => p[1] >= s, (a, b) => [a[0] + ((b[0] - a[0]) * (s - a[1])) / (b[1] - a[1]), s]],
+    [(p) => p[1] <= n, (a, b) => [a[0] + ((b[0] - a[0]) * (n - a[1])) / (b[1] - a[1]), n]]];
+  for (const [inside, cut] of edges) {
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], prev = pts[(i + pts.length - 1) % pts.length];
+      const ci = inside(cur), pi = inside(prev);
+      if (ci) { if (!pi) out.push(cut(prev, cur)); out.push(cur); } else if (pi) out.push(cut(prev, cur));
+    }
+    pts = out;
+    if (pts.length < 3) return [];
+  }
+  return pts;
+}
+function clipLine(line, w, s, e, n) {
+  const pieces = [];
+  let cur = [];
+  for (let i = 1; i < line.length; i++) {
+    let [x0, y0] = line[i - 1], [x1, y1] = line[i];
+    let t0 = 0, t1 = 1;
+    const dx = x1 - x0, dy = y1 - y0;
+    let ok = true;
+    for (const [p, q] of [[-dx, x0 - w], [dx, e - x0], [-dy, y0 - s], [dy, n - y0]]) {
+      if (p === 0) { if (q < 0) { ok = false; break; } continue; }
+      const r = q / p;
+      if (p < 0) { if (r > t1) { ok = false; break; } if (r > t0) t0 = r; } else { if (r < t0) { ok = false; break; } if (r < t1) t1 = r; }
+    }
+    if (!ok) { if (cur.length > 1) pieces.push(cur); cur = []; continue; }
+    const a = [x0 + dx * t0, y0 + dy * t0], b = [x0 + dx * t1, y0 + dy * t1];
+    if (!cur.length || t0 > 0) { if (cur.length > 1) pieces.push(cur); cur = [a]; }
+    cur.push(b);
+    if (t1 < 1) { pieces.push(cur); cur = []; }
+  }
+  if (cur.length > 1) pieces.push(cur);
+  return pieces;
+}
+const toPts = (ring) => { const p = []; for (const [lon, lat] of ring) { const [x, y] = project(lat, lon); p.push(x, y); } return closeRing(p); };
+const VT_LANDCOVER = { grass: 'grass', wood: 'wood', wetland: 'wetland', farmland: 'meadow', sand: null };
+const VT_LANDUSE = { cemetery: 'cemetery', stadium: 'stadium', pitch: 'pitch', playground: 'playground', track: 'track', railway: 'railway', industrial: 'industrial', garages: 'garages', theme_park: 'park', zoo: 'park' };
+const VT_PATH = { footway: 'footway', cycleway: 'cycleway', path: 'path', pedestrian: 'pedestrian', steps: 'steps', bridleway: 'path', corridor: null, platform: null };
+let vtSeq = 1;
+
+function ingestVT(t, buf) {
+  const vt = new VectorTile(new Pbf(buf));
+  const w = tx2lon(t.tx), e = tx2lon(t.tx + 1), n = ty2lat(t.ty), s = ty2lat(t.ty + 1);
+  const each = (name, cb) => {
+    const l = vt.layers[name];
+    if (!l) return;
+    for (let i = 0; i < l.length; i++) {
+      try {
+        const f = l.feature(i);
+        cb(f.properties || {}, f.toGeoJSON(t.tx, t.ty, Z).geometry, f, i);
+      } catch (err) { console.warn('[OSM] пропущен объект слоя', name, err); }
+    }
+  };
+  const polys = (g) => {
+    const list = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    const out = [];
+    for (const poly of list) {
+      const rings = poly.map((r) => clipRing(r.slice(0, -1), w, s, e, n)).filter((r) => r.length >= 3).map(toPts);
+      if (rings.length && rings[0].length >= 6) out.push(rings);
+    }
+    return out;
+  };
+  const lines = (g) => {
+    const list = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+    const out = [];
+    for (const l of list) for (const piece of clipLine(l, w, s, e, n)) out.push(piece);
+    return out;
+  };
+  each('water', (p, g) => { for (const rings of polys(g)) addWater(rings, vtSeq++); });
+  each('landcover', (p, g) => { const kind = VT_LANDCOVER[p.class]; if (kind) for (const rings of polys(g)) addArea(rings, { landuse: kind }, vtSeq++); });
+  each('landuse', (p, g) => { const kind = VT_LANDUSE[p.class]; if (kind) for (const rings of polys(g)) addArea(rings, { landuse: kind }, vtSeq++); });
+  each('park', (p, g) => { for (const rings of polys(g)) addArea(rings, { leisure: 'park' }, vtSeq++); });
+  each('building', (p, g, f, i) => {
+    if (p.hide_3d) return;
+    const tags = { building: 'yes', 'building:colour': p.colour };
+    if (p.render_height > 0) tags.height = String(Math.max(4, p.render_height));
+    if (p.render_min_height > 0) tags.min_height = String(p.render_min_height);
+    const id = (f.id || 0) * 31 + t.tx * 7 + t.ty * 13 + i;
+    for (const rings of polys(g)) addBuilding(t, rings, tags, id);
+  });
+  each('waterway', (p, g) => {
+    const wdt = p.class === 'canal' ? 80 : p.class === 'stream' || p.class === 'ditch' || p.class === 'drain' ? 30 : 0;
+    if (!wdt || p.brunnel === 'tunnel') return;
+    for (const l of lines(g)) { const pts = toPts(l); const bb = bboxPts(pts); binAdd('rails', { pts, water: true, w: wdt, id: vtSeq++ }, bb.x0 - wdt, bb.y0 - wdt, bb.x1 + wdt, bb.y1 + wdt); }
+  });
+  each('transportation', (p, g) => {
+    if (p.brunnel === 'tunnel' || p.indoor) return;
+    const cls = p.class;
+    if (cls === 'rail' || cls === 'transit') {
+      const tram = p.subclass === 'tram';
+      if (p.subclass === 'subway' && !p.brunnel) return;
+      for (const l of lines(g)) { const pts = toPts(l); const bb = bboxPts(pts); binAdd('rails', { pts, tram, bridge: p.brunnel === 'bridge', id: vtSeq++ }, bb.x0 - 40, bb.y0 - 40, bb.x1 + 40, bb.y1 + 40); }
+      return;
+    }
+    let hw = null;
+    if (['motorway', 'trunk', 'primary', 'secondary', 'tertiary'].includes(cls)) hw = p.ramp ? cls + '_link' : cls;
+    else if (cls === 'minor' || cls === 'busway') hw = 'residential';
+    else if (cls === 'service') hw = 'service';
+    else if (cls === 'track') hw = 'track';
+    else if (cls === 'path') hw = VT_PATH[p.subclass] === undefined ? 'footway' : VT_PATH[p.subclass];
+    else if (cls === 'pedestrian') hw = 'pedestrian';
+    if (!hw) return;
+    const tags = { highway: hw };
+    if (p.brunnel === 'bridge') tags.bridge = 'yes';
+    if (p.oneway === 1) tags.oneway = 'yes'; else if (p.oneway === -1) tags.oneway = '-1';
+    for (const l of lines(g)) {
+      const geometry = l.map(([lon, lat]) => ({ lat, lon }));
+      const nodes = ROAD[hw] && ROAD[hw][2] === 'car' ? geometry.map((q) => { const [x, y] = project(q.lat, q.lon); return nodeAt(x, y); }) : null;
+      addRoad({ id: vtSeq++, tags, geometry, nodes });
+    }
+  });
+  each('place', (p, g) => {
+    if (g.type !== 'Point' || !['suburb', 'quarter', 'neighbourhood', 'city_block'].includes(p.class)) return;
+    const name = p['name:ru'] || p.name;
+    if (!name) return;
+    const [x, y] = project(g.coordinates[1], g.coordinates[0]);
+    binAdd('places', { x, y, name }, x, y, x, y);
+  });
+  // светофоры: перекрёстки, где сходятся хотя бы две улицы уровня tertiary и выше
+  for (const nd of nodesIn(t.rect.x0, t.rect.y0, t.rect.x1, t.rect.y1)) {
+    if (nd.signal || !nd.nav || nd.nav.size < 3 || !sameTile(t, nd.x, nd.y)) continue;
+    let major = 0;
+    for (const [, ed] of nd.adj) if (ed.road.rank <= 4) major++;
+    for (const id of nd.nav) { const m = graph.get(id); const ed = m && m.adj.get(nd.id); if (ed && ed.road.rank <= 4) major++; }
+    if (major >= 3) { nd.signal = true; t.signals.push({ x: nd.x, y: nd.y, id: nd.id }); }
+  }
+  scatterTrees(t);
+}
 
 // ---------------------------------------------------------------- запросы для игры
 function distSeg(px, py, ax, ay, bx, by) {
