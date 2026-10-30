@@ -8,6 +8,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import * as W from './world.js';
 import { CS, buildChunkAt, peekChunk, releaseCanvas } from './chunks.js';
 import { signalState } from './traffic.js';
+import { MAP } from './map.js';
+import * as OSM from './osm.js';
 import { S, LIGHT_RGB, CAR_COLORS, CAR_DIM } from './sprites.js';
 import { rain } from './rain.js';
 import { hashU } from './util.js';
@@ -56,6 +58,11 @@ class Geo {
     this.quad([x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1], [0, 0, 1], side, suv(0, dx));
     this.quad([x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [0, 0, -1], side, suv(0, dx));
     if (bottom) this.quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0], side, null);
+  }
+  tri(a, b, c, n, cl) {
+    for (const q of [a, b, c]) { this.p.push(q[0], q[1], q[2]); this.n.push(n[0], n[1], n[2]); this.c.push(cl.r, cl.g, cl.b); this.u.push(DARK_UV, DARK_UV); }
+    this.i.push(this.v, this.v + 1, this.v + 2);
+    this.v += 3;
   }
   cube(x, y, z, s, cl) { this.box(x - s / 2, y - s / 2, z - s / 2, x + s / 2, y + s / 2, z + s / 2, cl, cl, null, true); }
   empty() { return this.v === 0; }
@@ -409,10 +416,10 @@ export function createVoxel(cv) {
     doFlash(l.lx, l.ly, 3, 0xbfd8ff);
     // перепекаем землю вокруг — пятно света исчезает
     for (const [key, e] of [...chunks]) {
-      const [cx, cy] = key.split(',').map(Number);
-      const x0 = cx * CS, y0 = cy * CS;
-      if (l.lx + l.r < x0 || l.lx - l.r > x0 + CS || l.ly + l.r < y0 || l.ly - l.r > y0 + CS) continue;
-      chunks.set(key, bakeChunk(buildChunkAt(cx, cy)));
+      if (l.lx + l.r < e.x0 || l.lx - l.r > e.x0 + e.size || l.ly + l.r < e.y0 || l.ly - l.r > e.y0 + e.size) continue;
+      const ne = e.rebake();
+      if (!ne) continue;
+      chunks.set(key, ne);
       dropChunk(e);
     }
   }
@@ -508,12 +515,8 @@ export function createVoxel(cv) {
   }
 
   // ---------------------------------------------------------------- чанки земли
-  const dark = canvas(TEX, TEX), dg = dark.getContext('2d');
   function bakeChunk(ch) {
-    const x0 = ch.cx * CS, y0 = ch.cy * CS, k = TEX / CS;
-    const c = canvas(TEX, TEX), g = c.getContext('2d');
-    g.drawImage(ch.canvas, 0, 0, TEX, TEX);
-    releaseCanvas(ch);
+    const x0 = ch.cx * CS, y0 = ch.cy * CS;
     // свет: фонари этого чанка, соседних и всех кварталов вокруг
     const lamps = new Set(ch.lamps);
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
@@ -523,28 +526,12 @@ export function createVoxel(cv) {
     for (let i = W.colAt(x0 - 260); i <= W.colAt(x0 + CS + 260); i++) for (let j = W.rowAt(y0 - 260); j <= W.rowAt(y0 + CS + 260); j++) {
       for (const l of W.getBlock(i, j).lamps) lamps.add(l);
     }
-    const near = [...lamps].filter((l) => !l.broken && l.lx + l.r > x0 && l.lx - l.r < x0 + CS && l.ly + l.r > y0 && l.ly - l.r < y0 + CS);
-    dg.globalCompositeOperation = 'source-over';
-    dg.globalAlpha = 1;
-    dg.clearRect(0, 0, TEX, TEX);
-    dg.fillStyle = 'rgba(1,2,8,0.9)';
-    dg.fillRect(0, 0, TEX, TEX);
-    dg.globalCompositeOperation = 'destination-out';
-    for (const l of near) {
-      const r = l.r * k;
-      dg.globalAlpha = Math.min(1, l.i * (l.dot ? 0.7 : 0.85));
-      dg.drawImage(S.mask, (l.lx - x0) * k - r, (l.ly - y0) * k - r, r * 2, r * 2);
-    }
-    g.drawImage(dark, 0, 0);
-    g.globalCompositeOperation = 'lighter';
-    for (const l of near) {
-      const spr = S.glow[l.c] || S.glow.white;
-      const r = (l.dot ? 14 : l.r * 0.95) * k;
-      g.globalAlpha = Math.min(1, l.i * (l.dot ? 0.5 : l.c === 'sodium' ? 0.2 : l.c === 'white' ? 0.09 : 0.24));
-      g.drawImage(spr, (l.lx - x0) * k - r, (l.ly - y0) * k - r, r * 2, r * 2);
-    }
-    // светящиеся зебры
-    g.globalAlpha = 1;
+    const e = bakeGround(ch.canvas, x0, y0, CS, TEX, lamps, ch.lamps, procZebras);
+    releaseCanvas(ch);
+    e.rebake = () => bakeChunk(buildChunkAt(ch.cx, ch.cy));
+    return e;
+  }
+  function procZebras(g, x0, y0, k) {
     g.fillStyle = 'rgba(255,255,255,0.2)';
     for (let i = W.colAt(x0 - 100); i <= W.colAt(x0 + CS + 100) + 1; i++) for (let j = W.rowAt(y0 - 100); j <= W.rowAt(y0 + CS + 100) + 1; j++) {
       const x = W.roadX(i), y = W.roadY(j);
@@ -558,6 +545,39 @@ export function createVoxel(cv) {
       for (let u = -hw + 5; u < hw - 8; u += 11) { R(x + u, y - hh - 22, 6, 18); R(x + u, y + hh + 4, 6, 18); }
       for (let u = -hh + 5; u < hh - 8; u += 11) { R(x - hw - 22, y + u, 18, 6); R(x + hw + 4, y + u, 18, 6); }
     }
+  }
+  // Ночная текстура куска земли: исходник × темнота − пятна фонарей + цветное свечение.
+  // allLamps — все фонари, чей свет может попасть сюда; poles — фонари, чьи столбы стоят в этом куске.
+  const darkCv = {};
+  function bakeGround(src, x0, y0, size, texN, allLamps, poles, extra) {
+    const k = texN / size;
+    const c = canvas(texN, texN), g = c.getContext('2d');
+    g.drawImage(src, 0, 0, texN, texN);
+    let dk = darkCv[texN];
+    if (!dk) { const cv = canvas(texN, texN); dk = darkCv[texN] = { cv, g: cv.getContext('2d') }; }
+    const dg = dk.g;
+    const near = [...allLamps].filter((l) => !l.broken && !l.dead && l.lx + l.r > x0 && l.lx - l.r < x0 + size && l.ly + l.r > y0 && l.ly - l.r < y0 + size);
+    dg.globalCompositeOperation = 'source-over';
+    dg.globalAlpha = 1;
+    dg.clearRect(0, 0, texN, texN);
+    dg.fillStyle = 'rgba(1,2,8,0.9)';
+    dg.fillRect(0, 0, texN, texN);
+    dg.globalCompositeOperation = 'destination-out';
+    for (const l of near) {
+      const r = l.r * k;
+      dg.globalAlpha = Math.min(1, l.i * (l.dot ? 0.7 : 0.85));
+      dg.drawImage(S.mask, (l.lx - x0) * k - r, (l.ly - y0) * k - r, r * 2, r * 2);
+    }
+    g.drawImage(dk.cv, 0, 0);
+    g.globalCompositeOperation = 'lighter';
+    for (const l of near) {
+      const spr = S.glow[l.c] || S.glow.white;
+      const r = (l.dot ? 14 : l.r * 0.95) * k;
+      g.globalAlpha = Math.min(1, l.i * (l.dot ? 0.5 : l.c === 'sodium' ? 0.2 : l.c === 'white' ? 0.09 : 0.24));
+      g.drawImage(spr, (l.lx - x0) * k - r, (l.ly - y0) * k - r, r * 2, r * 2);
+    }
+    g.globalAlpha = 1;
+    if (extra) extra(g, x0, y0, k);
     g.globalCompositeOperation = 'source-over';
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
@@ -565,15 +585,15 @@ export function createVoxel(cv) {
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.anisotropy = 4;
     const grp = new THREE.Group();
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(CS, CS), new THREE.MeshBasicMaterial({ map: tex }));
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ map: tex }));
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(x0 + CS / 2, 0, y0 + CS / 2);
+    ground.position.set(x0 + size / 2, 0, y0 + size / 2);
     grp.add(ground);
     // столбы и светящиеся головы фонарей
     const solid = new Geo(), glow = new Geo();
     const poleC = col('#4a4e56');
-    for (const l of ch.lamps) {
-      if (l.broken) continue;
+    for (const l of poles) {
+      if (l.broken || l.dead) continue;
       if (l.dot) { glow.cube(l.lx, 9, l.ly, 3.5, glowCol(l.c, 2.4)); continue; }
       if (!l.pole) continue;
       solid.box(l.x - 1.5, 0, l.y - 1.5, l.x + 1.5, 56, l.y + 1.5, poleC);
@@ -584,7 +604,7 @@ export function createVoxel(cv) {
     if (!solid.empty()) grp.add(new THREE.Mesh(solid.build(), solidMat));
     if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
     scene.add(grp);
-    return { grp, tex };
+    return { grp, tex, x0, y0, size };
   }
   function dropChunk(e) {
     scene.remove(e.grp);
@@ -814,6 +834,141 @@ export function createVoxel(cv) {
     e.grp.traverse((o) => { if (o.geometry && o.geometry !== unitBox) o.geometry.dispose(); });
   }
 
+  // ---------------------------------------------------------------- Москва (OSM)
+  const H_CAP = 650; // видимая высота ограничена, чтобы небоскрёбы не упирались в камеру
+  const OSM_COL = {
+    house: '#3a332e', detached: '#3a332e', garage: '#34363a', garages: '#34363a', industrial: '#33363a', warehouse: '#33363a',
+    church: '#4a4038', cathedral: '#4a4038', apartments: '#2a2f3a', office: '#28303a', commercial: '#2e2c33', retail: '#33302e',
+  };
+  function prism(G, b, glow) {
+    const h = Math.min(b.height, H_CAP), z0 = Math.min(b.minH || 0, h - 4);
+    const hex = (v) => /^#[0-9a-f]{6}$/i.test(v || '');
+    const wall = lighten(OSM_COL[b.kind] || (hex(b.wall) ? b.wall : '#2b2e35'), '#3c4458', 0.35);
+    const roof = lighten(hex(b.roof) ? b.roof : '#3a3d44', '#4a5060', 0.2).multiplyScalar(0.8);
+    const s = b.seed;
+    const win = b.lit > 0.1 && h > 60 ? [((s % 32) * 2) / 64, (((s >>> 5) % 32) * 2) / 64, 1 / 7 / 64, 1 / 10 / 64] : null;
+    const pts = b.pts, n = pts.length / 2;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const ax = pts[j * 2], ay = pts[j * 2 + 1], bx = pts[i * 2], by = pts[i * 2 + 1];
+      const len = Math.hypot(bx - ax, by - ay);
+      if (len < 0.5) continue;
+      const nx = b.normals[i * 2], ny = b.normals[i * 2 + 1];
+      const uv = win ? [win[0], win[1] + z0 * win[3], win[0], win[1] + h * win[3], win[0] + len * win[2], win[1] + h * win[3], win[0] + len * win[2], win[1] + z0 * win[3]] : null;
+      // порядок вершин подбираем под нормаль наружу
+      const A = [ax, z0, ay], Bt = [ax, h, ay], Ct = [bx, h, by], D = [bx, z0, by];
+      const ex = bx - ax, ey = by - ay;
+      // нормаль квада (b-a)×(c-a) для A,Bt,Ct,D равна (ey*dh, 0, -ex*dh) — сравниваем с нужной
+      if (ey * nx - ex * ny > 0) G.quad(A, Bt, Ct, D, [nx, 0, ny], wall, uv);
+      else G.quad(D, Ct, Bt, A, [nx, 0, ny], wall, uv ? [uv[6], uv[7], uv[4], uv[5], uv[2], uv[3], uv[0], uv[1]] : null);
+    }
+    // крыша
+    const contour = [], holes = [];
+    for (let i = 0; i < n; i++) contour.push(new THREE.Vector2(pts[i * 2], pts[i * 2 + 1]));
+    for (const hr of b.holes || []) { const hh = []; for (let i = 0; i < hr.length; i += 2) hh.push(new THREE.Vector2(hr[i], hr[i + 1])); holes.push(hh); }
+    let faces = [];
+    try { faces = THREE.ShapeUtils.triangulateShape(contour, holes); } catch (e) { faces = []; }
+    const all = contour.concat(...holes);
+    for (const [a, bq, c] of faces) {
+      const A = all[a], Bv = all[bq], Cv = all[c];
+      // смотрим, чтобы треугольник был лицом вверх
+      const cr = (Bv.x - A.x) * (Cv.y - A.y) - (Bv.y - A.y) * (Cv.x - A.x);
+      if (cr < 0) G.tri([A.x, h, A.y], [Bv.x, h, Bv.y], [Cv.x, h, Cv.y], [0, 1, 0], roof);
+      else G.tri([A.x, h, A.y], [Cv.x, h, Cv.y], [Bv.x, h, Bv.y], [0, 1, 0], roof);
+    }
+    if (b.height > 900 && glow) glow.cube(b.cx, h + 4, b.cy, 6, glowCol('red', 3));
+  }
+  function buildOSMTile(t) {
+    const solid = new Geo(), glow = new Geo();
+    for (const b of t.buildings) prism(solid, b, glow);
+    for (const tr of t.trees) {
+      solid.box(tr.x - 2.5, 0, tr.y - 2.5, tr.x + 2.5, 12, tr.y + 2.5, col('#2a2018'));
+      const c = col(TREE_C[tr.v % 4], 1.3), c2 = col(TREE_C[(tr.v + 1) % 4], 1.6), r = tr.r * 0.8;
+      if (tr.kind === 1) {
+        solid.box(tr.x - r, 10, tr.y - r, tr.x + r, 22, tr.y + r, c);
+        solid.box(tr.x - r * 0.65, 22, tr.y - r * 0.65, tr.x + r * 0.65, 34, tr.y + r * 0.65, c);
+        solid.box(tr.x - r * 0.3, 34, tr.y - r * 0.3, tr.x + r * 0.3, 44, tr.y + r * 0.3, c2);
+      } else {
+        solid.box(tr.x - r, 12, tr.y - r, tr.x + r, 12 + r * 1.2, tr.y + r, c);
+        solid.box(tr.x - r * 0.6, 12 + r * 1.2, tr.y - r * 0.6, tr.x + r * 0.6, 12 + r * 1.7, tr.y + r * 0.6, c2);
+      }
+    }
+    // подвесные светофоры над перекрёстками
+    for (const sg of t.signals) solid.box(sg.x - 5, 40, sg.y - 5, sg.x + 5, 56, sg.y + 5, col('#15171b'), col('#15171b'), null, true);
+    const grp = new THREE.Group();
+    if (!solid.empty()) grp.add(new THREE.Mesh(solid.build(), solidMat2));
+    if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
+    scene.add(grp);
+    return { grp, cranes: [], B: { panes: [] }, panes: null };
+  }
+  function manageOSM(T, budget) {
+    OSM.requestAround(T.x, T.z, T.vx || 0, T.vy || 0);
+    const GCs = OSM.GROUND;
+    const need = [];
+    const want = new Set();
+    for (let gx = Math.floor((T.x - CHUNK_R) / GCs); gx <= Math.floor((T.x + CHUNK_R) / GCs); gx++) {
+      for (let gy = Math.floor((T.z - CHUNK_R * 1.2) / GCs); gy <= Math.floor((T.z + CHUNK_R * 0.6) / GCs); gy++) {
+        const key = 'o' + gx + ',' + gy;
+        want.add(key);
+        if (!chunks.has(key)) need.push([gx, gy, Math.hypot((gx + 0.5) * GCs - T.x, (gy + 0.5) * GCs - T.z)]);
+      }
+    }
+    for (const [key, e] of chunks) if (!want.has(key)) { dropChunk(e); chunks.delete(key); }
+    need.sort((a, b) => a[2] - b[2]);
+    let left = budget, waiting = 0;
+    for (const [gx, gy] of need) {
+      if (left <= 0) { waiting++; continue; }
+      const e = bakeOSM(gx, gy);
+      if (!e) { waiting++; continue; }
+      chunks.set('o' + gx + ',' + gy, e);
+      left--;
+    }
+    // здания кусками по 600 м
+    const bwant = new Set();
+    for (const t of OSM.tilesIn(T.x - BLOCK_R, T.z - BLOCK_R * 1.25, T.x + BLOCK_R, T.z + BLOCK_R * 0.55)) {
+      const key = 't' + t.tx + ',' + t.ty;
+      bwant.add(key);
+      if (!blocks.has(key) && left-- > 0) blocks.set(key, buildOSMTile(t));
+    }
+    for (const [key, e] of blocks) if (!bwant.has(key)) { dropBlock(e); blocks.delete(key); }
+    return waiting;
+  }
+  function bakeOSM(gx, gy) {
+    const ch = OSM.groundChunk(gx, gy);
+    if (!ch) return null;
+    const all = OSM.groundLampsAround(ch.x0 - 200, ch.y0 - 200, ch.x0 + ch.size + 200, ch.y0 + ch.size + 200);
+    const e = bakeGround(ch.canvas, ch.x0, ch.y0, ch.size, 512, all, ch.lamps, null);
+    OSM.releaseGround(ch);
+    e.rebake = () => bakeOSM(gx, gy);
+    return e;
+  }
+  function syncSignalsOSM(st, T) {
+    let n = 0;
+    for (const t of OSM.tilesIn(T.x - 1700, T.z - 2000, T.x + 1700, T.z + 1000)) {
+      for (const sg of t.signals) {
+        const ph = ((hashU(sg.id % 1000003, 7, 7) % 1000) / 1000) * 16;
+        const p = (st.time + ph) % 16;
+        const sst = p < 6.5 ? 0 : p < 8 ? 1 : p < 14.5 ? 2 : 3;
+        for (const [dx, dz, ax] of [[1, 0, 'h'], [-1, 0, 'h'], [0, 1, 'v'], [0, -1, 'v']]) {
+          const go = ax === 'h' ? sst === 0 : sst === 2, amber = ax === 'h' ? sst === 1 : sst === 3;
+          const cols = [!go && !amber ? SIG.red : SIG.off, amber ? SIG.yellow : SIG.off, go ? SIG.green : SIG.off];
+          for (let k = 0; k < 3; k++) {
+            if (n >= MAXS) break;
+            tmpP.set(sg.x + dx * 5.4, 53 - k * 5, sg.y + dz * 5.4);
+            tmpS.set(3.6, 3.6, 3.6);
+            tmpM.compose(tmpP, tmpQ.identity(), tmpS);
+            sigMesh.setMatrixAt(n, tmpM);
+            sigMesh.setColorAt(n, cols[k]);
+            n++;
+          }
+        }
+      }
+    }
+    tmpS.set(1, 1, 1);
+    sigMesh.count = n;
+    sigMesh.instanceMatrix.needsUpdate = true;
+    if (sigMesh.instanceColor) sigMesh.instanceColor.needsUpdate = true;
+  }
+
   // ---------------------------------------------------------------- кадр
   let built = 0;
   function manage(T, budget) {
@@ -956,8 +1111,9 @@ export function createVoxel(cv) {
     },
     render(st, first) {
       const k = Math.min(st.W, st.H) / st.cam.z / 820;
-      const T = { x: st.cam.x, z: st.cam.y };
-      const pending = manage(T, first ? 400 : 2);
+      const T = { x: st.cam.x, z: st.cam.y, vx: st.player.vx, vy: st.player.vy };
+      const osm = MAP.kind === 'osm';
+      const pending = osm ? manageOSM(T, first ? 60 : 2) : manage(T, first ? 400 : 2);
       camera.position.set(T.x, 820 * k, T.z + 620 * k);
       camera.lookAt(T.x, 0, T.z - 60 * k);
       scene.fog.near = 1500 * k; scene.fog.far = 3400 * k;
@@ -967,7 +1123,7 @@ export function createVoxel(cv) {
       syncTrains(st);
       syncRain(st);
       syncSkids(st);
-      syncSignals(st, T);
+      if (osm) syncSignalsOSM(st, T); else syncSignals(st, T);
       handleFx(st, st.dt);
             composer.render();
       return pending;

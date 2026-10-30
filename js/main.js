@@ -8,6 +8,16 @@ import { rain, updateRain } from './rain.js';
 import { createAudio } from './audio.js';
 import { createVoxel } from './voxel.js';
 import { police, updatePolice, addHeat, clearHeat, stars, sirenLevel } from './police.js';
+import { MAP, useMap } from './map.js';
+import { procMap } from './procmap.js';
+import * as OSM from './osm.js';
+import { updateTrafficOSM, updatePedsOSM } from './osmtraffic.js';
+
+// режим карты: процедурный город или Москва (?map=moscow&at=N)
+const params = new URLSearchParams(location.search);
+const MOSCOW = params.get('map') === 'moscow';
+const atIdx = Math.max(0, Math.min(OSM.PLACES.length - 1, parseInt(params.get('at') || '0', 10) || 0));
+useMap(MOSCOW ? 'osm' : 'proc', MOSCOW ? OSM.osmMap : procMap);
 
 const glCv = document.getElementById('gl');
 const mini = document.getElementById('minimap');
@@ -80,14 +90,35 @@ function roadSpot(i0, j0) {
   }
   return [W.roadX(i0) - 21, W.roadY(j0) + 300];
 }
-const [sx, sy] = roadSpot(0, 0);
+// Москва: стартуем у выбранного места, машину ставим на ближайший участок улицы, когда загрузятся данные
+let osmWaiting = MOSCOW;
+const start = MOSCOW ? OSM.project(OSM.PLACES[atIdx][1], OSM.PLACES[atIdx][2]) : roadSpot(0, 0);
+const [sx, sy] = start;
 st.player = createPlayer(sx, sy, Math.PI / 2);
 st.cam.x = sx; st.cam.y = sy;
 
+function osmSpot(x, y) {
+  const n = OSM.nearestNode(x, y, 3000);
+  if (!n) return null;
+  const [nid] = [...(n.adj.size ? n.adj.keys() : n.nav)];
+  const m = OSM.graph.get(nid);
+  const a = Math.atan2(m.y - n.y, m.x - n.x);
+  const r = n.adj.get(nid);
+  const off = r && !r.road.oneway ? r.road.w / 4 : 0;
+  // чуть дальше от узла, на своей полосе
+  return [n.x + Math.cos(a) * 60 - Math.sin(a) * off, n.y + Math.sin(a) * 60 + Math.cos(a) * off, a];
+}
+
 function respawn() {
   const P = st.player;
-  const [x, y] = roadSpot(W.colAt(P.x), W.rowAt(P.y));
-  P.x = x; P.y = y; P.a = Math.PI / 2; P.vx = P.vy = 0;
+  if (MOSCOW) {
+    const sp = osmSpot(P.x, P.y);
+    if (sp) { [P.x, P.y, P.a] = sp; }
+  } else {
+    const [x, y] = roadSpot(W.colAt(P.x), W.rowAt(P.y));
+    P.x = x; P.y = y; P.a = Math.PI / 2;
+  }
+  P.vx = P.vy = 0;
   repairPlayer(P);
   police.cops.length = 0;
   if (stars() > 0) police.spawnT = 3;
@@ -154,6 +185,20 @@ for (const el of document.querySelectorAll('[data-k]')) {
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) document.body.classList.add('touch');
 document.getElementById('intro').addEventListener('click', () => { audio.start(); hideIntro(); });
 document.getElementById('rainbtn').addEventListener('click', (e) => { e.stopPropagation(); toggleRain(); });
+const mapBtn = document.getElementById('mapbtn');
+mapBtn.textContent = MOSCOW ? 'ГОРОД' : 'МОСКВА';
+mapBtn.addEventListener('click', (e) => { e.stopPropagation(); location.search = MOSCOW ? '' : '?map=moscow'; });
+const placeSel = document.getElementById('place');
+OSM.PLACES.forEach(([name], k) => { const o = document.createElement('option'); o.value = k; o.textContent = name; placeSel.appendChild(o); });
+placeSel.value = atIdx;
+for (const el of [placeSel, document.getElementById('modes-intro')]) el.addEventListener('click', (e) => e.stopPropagation());
+document.getElementById('go-city').addEventListener('click', (e) => { e.stopPropagation(); if (MOSCOW) location.search = ''; else { audio.start(); hideIntro(); } });
+document.getElementById('go-moscow').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (MOSCOW && String(atIdx) === placeSel.value) { audio.start(); hideIntro(); return; }
+  location.search = '?map=moscow&at=' + placeSel.value;
+});
+if (MOSCOW) document.body.classList.add('moscow');
 document.getElementById('fixbtn').addEventListener('click', (e) => { e.stopPropagation(); respawn(); });
 function hideIntro() { document.getElementById('intro').classList.add('hidden'); }
 
@@ -171,6 +216,7 @@ function toast(msg) { hudToast.textContent = msg; hudToast.classList.add('show')
 let lastDistrict = '';
 
 function drawMinimap() {
+  if (MOSCOW) return drawMinimapOSM();
   const s = mini.width;
   const P = st.player;
   const scale = 16 / DPR; // мировых единиц на пиксель
@@ -236,6 +282,41 @@ function drawMinimap() {
   m.restore();
 }
 
+function drawMinimapOSM() {
+  const s = mini.width;
+  const P = st.player;
+  const scale = 16 / DPR;
+  const half = (s / 2) * scale;
+  const m = mctx;
+  m.setTransform(1, 0, 0, 1, 0, 0);
+  m.fillStyle = '#1a1d26';
+  m.fillRect(0, 0, s, s);
+  m.setTransform(1 / scale, 0, 0, 1 / scale, s / 2 - P.x / scale, s / 2 - P.y / scale);
+  const x0 = P.x - half, x1 = P.x + half, y0 = P.y - half, y1 = P.y + half;
+  m.lineCap = 'round'; m.lineJoin = 'round';
+  const ring = (pts) => { m.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) m.lineTo(pts[i], pts[i + 1]); m.closePath(); };
+  for (const a of OSM.areasIn(x0, y0, x1, y1)) if (a.green) { m.beginPath(); for (const r of a.rings) ring(r); m.fillStyle = '#1d3a1e'; m.fill('evenodd'); }
+  for (const w of OSM.waterIn(x0, y0, x1, y1)) { m.beginPath(); for (const r of w.rings) ring(r); m.fillStyle = '#1a4a6a'; m.fill('evenodd'); }
+  for (const t of OSM.tilesIn(x0, y0, x1, y1)) {
+    m.beginPath();
+    for (const b of t.buildings) if (b.x < x1 && b.x + b.w > x0 && b.y < y1 && b.y + b.h > y0) ring(b.pts);
+    m.fillStyle = '#2a2d36'; m.fill();
+  }
+  for (const r of [...OSM.roadsIn(x0, y0, x1, y1)].sort((a, b) => b.rank - a.rank)) {
+    m.strokeStyle = r.rank <= 2 ? '#c8b070' : r.rank <= 4 ? '#8a8c94' : '#55585f';
+    m.lineWidth = Math.max(r.w, 3 * scale);
+    m.beginPath(); m.moveTo(r.pts[0], r.pts[1]); for (let i = 2; i < r.pts.length; i += 2) m.lineTo(r.pts[i], r.pts[i + 1]); m.stroke();
+  }
+  m.fillStyle = '#e8d070';
+  for (const c of st.traffic) m.fillRect(c.x - 25, c.y - 25, 50, 50);
+  m.fillStyle = '#4a7aff';
+  for (const c of police.cops) m.fillRect(c.x - 35, c.y - 35, 70, 70);
+  m.save(); m.translate(P.x, P.y); m.rotate(P.a);
+  m.fillStyle = '#ff3b3b';
+  m.beginPath(); m.moveTo(110, 0); m.lineTo(-70, -70); m.lineTo(-40, 0); m.lineTo(-70, 70); m.closePath(); m.fill();
+  m.restore();
+}
+
 // ---------------------------------------------------------------- цикл
 let last = performance.now();
 let frame = 0;
@@ -249,8 +330,8 @@ function step(dt) {
   collideCars(P, st.traffic, st);
   updatePolice(st, dt);
   st.cops = police.cops;
-  updateTraffic(st, dt);
-  updatePeds(st, dt);
+  if (MOSCOW) { updateTrafficOSM(st, dt); updatePedsOSM(st, dt); }
+  else { updateTraffic(st, dt); updatePeds(st, dt); }
 }
 
 function loop(now) {
@@ -262,8 +343,16 @@ function loop(now) {
   readInput();
   const P = st.player;
   const n = dt > 0.022 ? 2 : 1;
-  for (let k = 0; k < n; k++) step(dt / n);
-  updateTrains(st);
+  if (osmWaiting) {
+    // ждём данные OSM вокруг точки старта
+    OSM.requestAround(P.x, P.y);
+    const sp = OSM.tileReady(P.x, P.y) && osmSpot(P.x, P.y);
+    hudLoad.textContent = OSM.status.errors && !OSM.status.loading
+      ? `Не удаётся загрузить карту OpenStreetMap (${OSM.status.lastError}). Пробуем снова…`
+      : `Загружаем карту Москвы из OpenStreetMap… ${OSM.PLACES[atIdx][0]}`;
+    if (sp) { [P.x, P.y, P.a] = sp; st.cam.x = P.x; st.cam.y = P.y; osmWaiting = false; }
+  } else for (let k = 0; k < n; k++) step(dt / n);
+  if (!MOSCOW) updateTrains(st);
   if (P.dead) { P.deadT += dt; if (P.deadT > 3.5) respawn(); }
   const speed = Math.hypot(P.vx, P.vy);
   st.dist += speed * dt;
@@ -282,8 +371,8 @@ function loop(now) {
     st.shake *= Math.exp(-dt * 8);
   }
   updateRain(st, dt);
-  const pending = vox ? vox.render({ ...st, cam: camDraw }, frame < 3) : 0;
-  hudLoad.classList.toggle('hidden', frame > 2 && !!vox);
+  const pending = vox ? vox.render({ ...st, cam: camDraw }, frame < 3 || osmWaiting) : 0;
+  hudLoad.classList.toggle('hidden', frame > 2 && !!vox && !osmWaiting);
 
   // HUD
   hudSpeed.textContent = Math.round((speed / 10) * 3.6);
@@ -293,7 +382,7 @@ function loop(now) {
   hudStars.classList.toggle('blink', sN > 0 && police.bustT > 0);
   hudHp.style.background = P.hp > 60 ? '#5ee68a' : P.hp > 30 ? '#ffd27a' : '#ff4f5a';
   hudHpBox.classList.toggle('low', P.hp < 30);
-  const dname = W.districtAt(P.x, P.y);
+  const dname = MAP.impl.district(P.x, P.y);
   if (dname !== lastDistrict) {
     lastDistrict = dname;
     hudDistrict.textContent = dname;

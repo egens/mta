@@ -2,7 +2,7 @@
 // повреждения, ломающиеся фонари и стёкла.
 import * as W from './world.js';
 import { clamp } from './util.js';
-import { CS, peekChunk } from './chunks.js';
+import { MAP } from './map.js';
 
 export const MAX_SPEED = 580;
 const GRAVITY = 720;
@@ -90,7 +90,7 @@ export function updatePlayer(P, inp, dt, st) {
   }
 
   // высота: следуем поверхности, а если она уходит вниз или кончается подъём — летим
-  const s = W.surfaceAt(P.x, P.y, P.z);
+  const s = MAP.impl.surfaceAt(P.x, P.y, P.z);
   const zn = P.z + P.vz * dt;
   if (P.air || (P.vz > 0 && zn > s + 0.5) || zn > s + 3) {
     P.air = true;
@@ -125,7 +125,7 @@ function inWater(c) {
   const hl = c.L / 2 - 4, hw = c.W / 2 - 3;
   const pts = [[c.x, c.y], [c.x + fx * hl - fy * hw, c.y + fy * hl + fx * hw], [c.x + fx * hl + fy * hw, c.y + fy * hl - fx * hw],
     [c.x - fx * hl - fy * hw, c.y - fy * hl + fx * hw], [c.x - fx * hl + fy * hw, c.y - fy * hl - fx * hw]];
-  for (const [x, y] of pts) if (W.isWater(x, y)) return true;
+  for (const [x, y] of pts) if (MAP.impl.isWater(x, y)) return true;
   return false;
 }
 
@@ -196,6 +196,47 @@ function respond(c, h, bounce = 0.35) {
   return 0;
 }
 
+// Машина против многоугольника здания: углы и середины сторон машины, попавшие внутрь,
+// выталкиваются через ближайшее ребро; вершины здания внутри машины — по оси машины.
+function pointInPoly(pts, x, y) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
+    const xi = pts[i], yi = pts[i + 1], xj = pts[j], yj = pts[j + 1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function obbPoly(c, pg) {
+  const fx = Math.cos(c.a), fy = Math.sin(c.a), rx = -fy, ry = fx;
+  const hl = c.L / 2, hw = c.W / 2;
+  let best = null;
+  const pts = pg.pts;
+  for (const [u, v] of [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const px = c.x + fx * hl * u + rx * hw * v, py = c.y + fy * hl * u + ry * hw * v;
+    if (!pointInPoly(pts, px, py)) continue;
+    // ближайшее ребро
+    let bd = Infinity, bnx = 0, bny = 0;
+    for (let i = 0, j = pts.length - 2, e = pg.normals.length - 2; i < pts.length; j = i, i += 2) {
+      const ax = pts[j], ay = pts[j + 1], bx = pts[i], by = pts[i + 1];
+      const ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1;
+      const t = Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / l2));
+      const d = Math.hypot(px - ax - ex * t, py - ay - ey * t);
+      if (d < bd) { bd = d; const k = i / 2; bnx = pg.normals[k * 2]; bny = pg.normals[k * 2 + 1]; }
+    }
+    if (!best || bd > best.d) best = { nx: bnx, ny: bny, d: bd + 0.5 };
+  }
+  if (best) return best;
+  // острый угол здания вошёл в бок машины
+  for (let i = 0; i < pts.length; i += 2) {
+    const dx = pts[i] - c.x, dy = pts[i + 1] - c.y;
+    const lx = dx * fx + dy * fy, ly = dx * rx + dy * ry;
+    if (Math.abs(lx) >= hl || Math.abs(ly) >= hw) continue;
+    const ox = hl - Math.abs(lx), oy = hw - Math.abs(ly);
+    return ox < oy ? { nx: -fx * Math.sign(lx), ny: -fy * Math.sign(lx), d: ox + 0.5 } : { nx: -rx * Math.sign(ly), ny: -ry * Math.sign(ly), d: oy + 0.5 };
+  }
+  return null;
+}
+
 // препятствие по высоте: машина [z, z+CAR_H] пересекается с [z0, z1]
 const zHit = (c, z0 = 0, z1 = Infinity) => (c.z || 0) < z1 - 2 && (c.z || 0) + CAR_H > z0;
 
@@ -203,20 +244,26 @@ export function collideStatic(c, st, isPlayer) {
   let impact = 0, ix = 0, iy = 0, inx = 0, iny = 0;
   if (st && st.onLampBreak) hitLamps(c, st, isPlayer);
   const r = Math.max(c.L, c.W);
-  const i0 = W.colAt(c.x - r), i1 = W.colAt(c.x + r), j0 = W.rowAt(c.y - r), j1 = W.rowAt(c.y + r);
   const near = (b) => !(c.x + r < b.x || c.x - r > b.x + b.w || c.y + r < b.y || c.y - r > b.y + b.h);
+  const groups = MAP.impl.collidersNear(c.x - r, c.y - r, c.x + r, c.y + r, []);
   for (let pass = 0; pass < 2; pass++) {
-    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
-      const B = W.getBlock(i, j);
+    for (const B of groups) {
+      // многоугольники зданий (карта Москвы)
+      if (B.polys) for (const pg of B.polys) {
+        if (!near(pg) || !zHit(c, 0, pg.z1)) continue;
+        const h = obbPoly(c, pg);
+        if (h) { const im = respond(c, h); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; inx = h.nx; iny = h.ny; } }
+      }
+      if (B.circles) for (const ci of B.circles) {
+        if (Math.abs(ci.x - c.x) > r + ci.r || Math.abs(ci.y - c.y) > r + ci.r || !zHit(c, 0, ci.z1)) continue;
+        const h = obbCircle(c, ci);
+        if (h) { const im = respond(c, h, 0.25); if (im > impact) { impact = im; ix = ci.x; iy = ci.y; inx = h.nx; iny = h.ny; } }
+      }
+      if (!B.boxes) continue;
       for (const b of B.boxes) {
         if (b.noSide || !near(b) || !zHit(c, b.z0, b.z1)) continue;
         const h = obbAabb(c, b);
         if (h) { const im = respond(c, h); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; inx = h.nx; iny = h.ny; } }
-      }
-      for (const ci of B.circles) {
-        if (Math.abs(ci.x - c.x) > r + ci.r || Math.abs(ci.y - c.y) > r + ci.r || !zHit(c, 0, ci.z1)) continue;
-        const h = obbCircle(c, ci);
-        if (h) { const im = respond(c, h, 0.25); if (im > impact) { impact = im; ix = ci.x; iy = ci.y; inx = h.nx; iny = h.ny; } }
       }
       // пандус сбоку — сплошной клин
       for (const rp of B.ramps) {
@@ -261,15 +308,10 @@ export function collideStatic(c, st, isPlayer) {
 function hitLamps(c, st, isPlayer) {
   if ((c.z || 0) > 50) return;
   const r = c.L / 2 + 8;
-  const cx0 = Math.floor((c.x - r) / CS), cx1 = Math.floor((c.x + r) / CS);
-  const cy0 = Math.floor((c.y - r) / CS), cy1 = Math.floor((c.y + r) / CS);
-  for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
-    const ch = peekChunk(cx, cy);
-    if (!ch) continue;
-    for (const l of ch.lamps) {
-      if (!l.pole || l.broken || Math.abs(l.x - c.x) > r || Math.abs(l.y - c.y) > r) continue;
+  MAP.impl.lampsNear(c.x - r, c.y - r, c.x + r, c.y + r, (l) => {
+      if (!l.pole || l.broken || Math.abs(l.x - c.x) > r || Math.abs(l.y - c.y) > r) return;
       const h = obbCircle(c, { x: l.x, y: l.y, r: 4.5 });
-      if (!h) continue;
+      if (!h) return;
       const sp = Math.hypot(c.vx, c.vy);
       if (sp > 50) {
         l.broken = true;
@@ -280,8 +322,7 @@ function hitLamps(c, st, isPlayer) {
       } else {
         respond(c, h, 0.2);
       }
-    }
-  }
+  });
 }
 
 // Игрок (или коп) против машин трафика

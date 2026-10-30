@@ -1,6 +1,6 @@
 // Розыск и погоня: «звёзды» за хулиганство, полицейские машины с той же физикой,
 // что и у игрока, едут по улицам к игроку и таранят его. Если стоять рядом с копом — арест.
-import * as W from './world.js';
+import { MAP } from './map.js';
 import { createPlayer, updatePlayer, collideStatic, collideCars, collideDyn } from './car.js';
 
 export const police = { heat: 0, cops: [], calm: 0, bustT: 0, spawnT: 0 };
@@ -30,55 +30,46 @@ function copSt(st, cop) {
 
 function spawnCop(st) {
   const P = st.player;
-  for (let tries = 0; tries < 6; tries++) {
-    const a = Math.random() * Math.PI * 2, d = 1300 + Math.random() * 600;
-    const i = W.colAt(P.x + Math.cos(a) * d), j = W.rowAt(P.y + Math.sin(a) * d);
-    const x = W.roadX(i) + 21, y = (W.roadY(j) + W.roadY(j + 1)) / 2;
-    if (W.isWater(x, y)) continue;
-    const c = createPlayer(x, y, Math.atan2(P.y - y, P.x - x));
-    c.cop = true; c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; c.L = 48; c.W = 22;
-    c.power = 0.86 + stars() * 0.04;
-    c.stuckT = 0; c.revT = 0; c.wp = null; c.next = null; c.prev = null; c.wreck = false; c.leave = false;
-    c.st = copSt(st, c);
-    police.cops.push(c);
-    return;
-  }
+  const sp = MAP.impl.roadSpawn(P.x, P.y, 1300, 1900);
+  if (!sp) return;
+  const [x, y, a] = sp;
+  const c = createPlayer(x, y, a);
+  c.cop = true; c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; c.L = 48; c.W = 22;
+  c.power = 0.86 + stars() * 0.04;
+  c.stuckT = 0; c.revT = 0; c.wp = null; c.next = null; c.prev = null; c.wreck = false; c.leave = false;
+  c.st = copSt(st, c);
+  police.cops.push(c);
 }
 
-// ближайший перекрёсток к точке
-function nearestNode(x, y) {
-  let i = W.colAt(x), j = W.rowAt(y);
-  if (Math.abs(W.roadX(i + 1) - x) < Math.abs(W.roadX(i) - x)) i++;
-  if (Math.abs(W.roadY(j + 1) - y) < Math.abs(W.roadY(j) - y)) j++;
-  return [i, j];
-}
-
-// соседний перекрёсток, который ближе всего к игроку
-function stepToward(i, j, P, fromI, fromJ) {
+// соседний узел дорожного графа, который ближе всего к игроку
+function stepToward(k, P, from) {
+  const nav = MAP.impl.nav;
   let best = null, bd = Infinity;
-  for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    if (i + di === fromI && j + dj === fromJ) continue;
-    const dd = Math.hypot(W.roadX(i + di) - P.x, W.roadY(j + dj) - P.y);
-    if (dd < bd) { bd = dd; best = [i + di, j + dj]; }
+  for (const n of nav.neighbors(k)) {
+    if (n === from) continue;
+    const [x, y] = nav.pos(n);
+    const dd = Math.hypot(x - P.x, y - P.y);
+    if (dd < bd) { bd = dd; best = n; }
   }
-  return best;
+  return best || from;
 }
 
-// Цель: рядом — сам игрок, далеко — следующий перекрёсток по сетке улиц.
-// Возвращает точку и «поворот впереди», чтобы успеть затормозить.
+// Цель: рядом — сам игрок, далеко — следующий перекрёсток по улицам.
+// Третье значение — расстояние до поворота впереди, чтобы успеть затормозить.
 function target(c, P) {
+  const nav = MAP.impl.nav;
   const d = Math.hypot(P.x - c.x, P.y - c.y);
-  if (d < 360) { c.wp = null; return [P.x + P.vx * 0.35, P.y + P.vy * 0.35, 0]; }
-  const at = (n) => [W.roadX(n[0]), W.roadY(n[1])];
-  if (!c.wp) c.wp = nearestNode(c.x, c.y);
-  let [wx, wy] = at(c.wp);
+  if (d < 360) { c.wp = null; return [P.x + P.vx * 0.35, P.y + P.vy * 0.35, Infinity]; }
+  if (!c.wp) { c.wp = nav.nearest(c.x, c.y); c.next = null; }
+  if (c.wp === null) return [P.x, P.y, Infinity];
+  let [wx, wy] = nav.pos(c.wp);
   if (Math.hypot(wx - c.x, wy - c.y) < 45) {
-    const nxt = c.next || stepToward(c.wp[0], c.wp[1], P, c.prev && c.prev[0], c.prev && c.prev[1]);
+    const nxt = c.next || stepToward(c.wp, P, c.prev);
     c.prev = c.wp; c.wp = nxt; c.next = null;
-    [wx, wy] = at(c.wp);
+    [wx, wy] = nav.pos(c.wp);
   }
-  if (!c.next) c.next = stepToward(c.wp[0], c.wp[1], P, c.prev && c.prev[0], c.prev && c.prev[1]);
-  const [nx, ny] = at(c.next);
+  if (!c.next) c.next = stepToward(c.wp, P, c.prev);
+  const [nx, ny] = nav.pos(c.next);
   const a1 = Math.atan2(wy - c.y, wx - c.x), a2 = Math.atan2(ny - wy, nx - wx);
   const turn = Math.abs(wrap(a2 - a1));
   return [wx, wy, turn > 0.5 ? Math.hypot(wx - c.x, wy - c.y) : Infinity];
