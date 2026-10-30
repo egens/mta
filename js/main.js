@@ -7,6 +7,7 @@ import { clamp, lerp } from './util.js';
 import { rain, updateRain } from './rain.js';
 import { createAudio } from './audio.js';
 import { createVoxel } from './voxel.js';
+import { police, updatePolice, addHeat, clearHeat, stars, sirenLevel } from './police.js';
 
 const glCv = document.getElementById('gl');
 const mini = document.getElementById('minimap');
@@ -18,6 +19,7 @@ const hudLoad = document.getElementById('loading');
 const hudStats = document.getElementById('stats');
 const hudHp = document.getElementById('hpbar');
 const hudHpBox = document.getElementById('hp');
+const hudStars = document.getElementById('stars');
 
 initSprites();
 const audio = createAudio();
@@ -25,7 +27,7 @@ const audio = createAudio();
 let DPR = 1;
 const st = {
   cam: { x: 0, y: 0, z: 1 }, W: 0, H: 0, time: 0, dt: 0, viewR: 2000,
-  player: null, traffic: [], peds: [], trains: [], skids: [], fx: [],
+  player: null, traffic: [], peds: [], trains: [], skids: [], fx: [], cops: police.cops,
   shake: 0, dist: 0,
   onImpact(power, x, y, sparks) {
     if (power < 40) return;
@@ -44,14 +46,29 @@ const st = {
     audio.explode();
     toast('Машина разбита! Новая через пару секунд…');
   },
-  onLampBreak(l, sp) {
+  onLampBreak(l, sp, byPlayer = true) {
     this.fx.push({ type: 'lamp', lamp: l });
-    this.shake = Math.min(14, this.shake + 4);
+    if (byPlayer) { this.shake = Math.min(14, this.shake + 4); addHeat(0.35); }
     audio.lampHit();
+  },
+  onPaneBreak(p, c, byPlayer = true) {
+    this.fx.push({ type: 'pane', pane: p });
+    audio.glass(1);
+    if (byPlayer) { this.shake = Math.min(14, this.shake + 3); addHeat(0.25); }
+  },
+  onCarHit(o, power) {
+    if (power > 110) addHeat(o.police ? 1 : 0.3);
   },
   onPedHit() {
     audio.thud(0.4);
+    addHeat(1);
     toast('Осторожнее на тротуаре!');
+  },
+  onBusted() {
+    toast('ЗАДЕРЖАН! Розыск снят');
+    audio.crash(120);
+    clearHeat();
+    respawn();
   },
 };
 
@@ -72,6 +89,8 @@ function respawn() {
   const [x, y] = roadSpot(W.colAt(P.x), W.rowAt(P.y));
   P.x = x; P.y = y; P.a = Math.PI / 2; P.vx = P.vy = 0;
   repairPlayer(P);
+  police.cops.length = 0;
+  if (stars() > 0) police.spawnT = 3;
 }
 
 // ---------------------------------------------------------------- графика
@@ -228,6 +247,8 @@ function step(dt) {
   updatePlayer(P, inp, dt, st);
   collideStatic(P, st, true);
   collideCars(P, st.traffic, st);
+  updatePolice(st, dt);
+  st.cops = police.cops;
   updateTraffic(st, dt);
   updatePeds(st, dt);
 }
@@ -267,6 +288,9 @@ function loop(now) {
   // HUD
   hudSpeed.textContent = Math.round((speed / 10) * 3.6);
   hudHp.style.width = P.hp + '%';
+  const sN = stars();
+  hudStars.textContent = sN ? '★'.repeat(sN) + '☆'.repeat(5 - sN) : '';
+  hudStars.classList.toggle('blink', sN > 0 && police.bustT > 0);
   hudHp.style.background = P.hp > 60 ? '#5ee68a' : P.hp > 30 ? '#ffd27a' : '#ff4f5a';
   hudHpBox.classList.toggle('low', P.hp < 30);
   const dname = W.districtAt(P.x, P.y);
@@ -277,6 +301,7 @@ function loop(now) {
   }
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) hudToast.classList.remove('show'); }
   if (frame % 3 === 0) drawMinimap();
+  audio.siren(sirenLevel(P));
   audio.update(dt, Math.hypot(P.vx, P.vy) * Math.sign(P.vx * Math.cos(P.a) + P.vy * Math.sin(P.a) || 1), MAX_SPEED, inp.up && !P.dead, P.drift, rain.k, P.dead);
 
   fpsN++; fpsT += dt;

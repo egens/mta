@@ -24,6 +24,9 @@
     text-transform: uppercase; color: var(--hud); text-shadow: 0 0 10px rgba(255,170,60,0.7), 2px 2px 0 #000; }
   #district.flash { animation: flash 2.4s ease-out; }
   @keyframes flash { 0% { opacity: 0; transform: translateY(-8px); } 15% { opacity: 1; transform: none; } 100% { opacity: 0.85; } }
+  #stars { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); font-size: 30px; letter-spacing: 4px; color: #ffd24a;
+    text-shadow: 0 0 10px #ff3030, 2px 2px 0 #000; }
+  #stars.blink { animation: pulse .4s infinite; }
   #speedo { position: fixed; right: 22px; bottom: 18px; text-align: right; }
   #speed { font-size: 56px; font-weight: 800; line-height: 1; color: #fff; text-shadow: 0 0 14px var(--pink), 3px 3px 0 #000; font-variant-numeric: tabular-nums; }
   #speedo small { display: block; font-size: 14px; letter-spacing: 0.2em; color: var(--cyan); text-shadow: 0 0 8px var(--cyan); }
@@ -70,6 +73,7 @@
 <div id="modes"><button id="fixbtn" title="R — новая машина на дороге">НОВАЯ</button><button id="rainbtn" title="T — дождь">☂</button></div>
 <canvas id="minimap"></canvas>
 <div id="district"></div>
+<div id="stars"></div>
 <div id="speedo"><div id="speed">0</div><small>КМ/Ч</small><div id="hp"><div id="hpbar"></div></div><div id="odo"></div></div>
 <div id="toast"></div>
 <div id="hint">H — управление · T — дождь · R — новая машина · M — звук</div>
@@ -93,7 +97,7 @@
 </div>
 <div id="intro">
   <h1>НОЧНОЙ <span>ГОРОД</span></h1>
-  <p>Бесконечный город, который строится прямо перед капотом. Воксельный ночной мегаполис: проспекты, диагонали, реки и мосты, парки, стройки, промзоны, стеклянные башни. Машина мнётся от ударов, фонари можно снести.</p>
+  <p>Бесконечный город, который строится прямо перед капотом. Воксельный ночной мегаполис: проспекты, диагонали, реки и мосты, парки, стройки, промзоны, стеклянные башни. Машина мнётся от ударов, фонари можно снести, через стеклянные холлы — проехать, с парковок — прыгнуть. За хулиганство — погоня.</p>
   <p>WASD / стрелки — ехать, пробел — ручник.</p>
   <div class="go">НАЖМИТЕ ЛЮБУЮ КЛАВИШУ</div>
 </div>

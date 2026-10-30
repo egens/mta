@@ -1,12 +1,13 @@
 // Воксельная графика на WebGL: город из кубов. Земля — запечённые ночные текстуры чанков,
-// здания/деревья/машины — объёмные блоки, неон — с bloom, стекло отражает окружение через кубическую камеру.
+// здания/деревья/машины — объёмные блоки, неон — с bloom.
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import * as W from './world.js';
-import { CS, buildChunkAt, peekChunk } from './chunks.js';
+import { CS, buildChunkAt, peekChunk, releaseCanvas } from './chunks.js';
+import { signalState } from './traffic.js';
 import { S, LIGHT_RGB, CAR_COLORS, CAR_DIM } from './sprites.js';
 import { rain } from './rain.js';
 import { hashU } from './util.js';
@@ -156,14 +157,20 @@ function carModel(kind, color, isPlayer = false) {
   g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
   g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
   if (!coneTex) { coneTex = new THREE.CanvasTexture(S.coneGlow); coneTex.colorSpace = THREE.SRGBColorSpace; }
-  const len = isPlayer ? 300 : 190;
-  const cone = new THREE.Mesh(new THREE.PlaneGeometry(len, len * 0.72), new THREE.MeshBasicMaterial({
-    map: coneTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: isPlayer ? 0.55 : 0.3, toneMapped: false,
-  }));
-  cone.rotation.x = -Math.PI / 2;
-  cone.position.set(L / 2 + len / 2 - 4, 1.2, 0);
-  g.add(cone);
-  g.userData.cone = cone;
+  // по лучу от каждой фары
+  const len = isPlayer ? 290 : 180;
+  const coneMat = new THREE.MeshBasicMaterial({
+    map: coneTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: isPlayer ? 0.32 : 0.18, toneMapped: false,
+  });
+  const coneGeo = new THREE.PlaneGeometry(len, len * 0.46);
+  g.userData.cones = [-1, 1].map((sd) => {
+    const cone = new THREE.Mesh(coneGeo, coneMat);
+    cone.rotation.x = -Math.PI / 2;
+    cone.position.set(L / 2 + len / 2 - 4, 1.2, sd * (Wd / 2 - 4));
+    g.add(cone);
+    return cone;
+  });
+  g.userData.isCone = new Set(g.userData.cones);
   g.userData.parts = P;
   g.userData.body = body;
   g.userData.baseColor = new THREE.Color(color);
@@ -179,7 +186,7 @@ const scorch = new THREE.Color('#161414');
 function applyDamage(m, P) {
   const { parts: Q, base, L, W: Wd } = m.userData;
   const d = P.dmg;
-  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.set(o === m.userData.cone ? -Math.PI / 2 : 0, 0, 0); }
+  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.set(m.userData.isCone.has(o) ? -Math.PI / 2 : 0, 0, 0); }
   const seg = L / 3;
   if (Q.front) {
     const k = d.front * 0.5;
@@ -204,9 +211,8 @@ function applyDamage(m, P) {
   tl.position.x += seg * d.rear * 0.45; tr.position.x += seg * d.rear * 0.45;
   hl.visible = d.front < 0.4 && !P.dead; hr.visible = d.front < 0.75 && !P.dead;
   tl.visible = d.rear < 0.45; tr.visible = d.rear < 0.8;
-  const cone = m.userData.cone;
-  cone.visible = hl.visible || hr.visible;
-  cone.material.opacity = hl.visible && hr.visible ? 0.55 : 0.3;
+  m.userData.cones[0].visible = hl.visible;
+  m.userData.cones[1].visible = hr.visible;
   m.userData.body.color.copy(m.userData.baseColor).lerp(scorch, P.dead ? 0.92 : (1 - P.hp / 100) * 0.55);
 }
 
@@ -281,40 +287,81 @@ export function createVoxel(cv) {
   const atlas = windowAtlas();
   const solidMat = new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0xffffff, emissiveMap: atlas, emissiveIntensity: 1.2 });
   const glowMatV = new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false });
-  // Кубическая камера на уровне улицы снимает настоящий город вокруг — его и отражают стеклянные фасады.
-  // За кадр обновляются две грани, полный оборот — за три кадра.
-  const cubeRT = new THREE.WebGLCubeRenderTarget(256, { generateMipmaps: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
-  const cubeCam = new THREE.CubeCamera(6, 4200, cubeRT);
-  scene.add(cubeCam);
-  let probeFace = -1;
-  const glassMat = new THREE.MeshPhongMaterial({
-    vertexColors: true, map: mullionTex(), envMap: cubeRT.texture, combine: THREE.MixOperation,
-    reflectivity: 0.88, shininess: 90, specular: 0x555555,
-    emissive: 0x0a1418, // слабый свет изнутри, чтобы стекло читалось и в тёмных местах
-  });
-  function updateProbe(T) {
-    cubeCam.position.set(T.x, 90, T.z);
-    cubeCam.updateMatrixWorld();
-    glassMat.visible = false;
-    const rl = rainLines.visible; rainLines.visible = false;
-    if (probeFace < 0) { cubeCam.update(renderer, scene); probeFace = 0; }
-    else {
-      const cur = renderer.getRenderTarget();
-      for (let n = 0; n < 2; n++) {
-        renderer.setRenderTarget(cubeRT, probeFace);
-        renderer.render(scene, cubeCam.children[probeFace]);
-        probeFace = (probeFace + 1) % 6;
-      }
-      renderer.setRenderTarget(cur);
-    }
-    glassMat.visible = true;
-    rainLines.visible = rl;
-  }
+  // тонированное стекло без отражений: стыки панелей и слабый свет изнутри
+  const glassMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: mullionTex(), emissive: 0x0d1a22 });
+  // стёкла вестибюлей — полупрозрачные
+  const paneMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, emissive: 0x3a5a6a, transparent: true, opacity: 0.38, depthWrite: false });
+  const solidMat2 = solidMat.clone();
+  solidMat2.side = THREE.DoubleSide;
 
   const chunks = new Map();
   const blocks = new Map();
   const cars = new Map();
+  const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpS = new THREE.Vector3(1, 1, 1), tmpP = new THREE.Vector3();
   let playerModel = null, playerGen = -1;
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(50, 26), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false }));
+  scene.add(shadow);
+  // светофоры: столбы — отдельные меши, огни — один инстанс на все
+  const signals = new Map();
+  const MAXS = 2400;
+  const sigMesh = new THREE.InstancedMesh(unitBox, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }), MAXS);
+  sigMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  sigMesh.frustumCulled = false;
+  sigMesh.count = 0;
+  scene.add(sigMesh);
+  const sc = (h, k = 1) => new THREE.Color(h).multiplyScalar(k);
+  const SIG = { red: sc('#ff2a1a', 3), yellow: sc('#ffc020', 3), green: sc('#30ff70', 3), off: sc('#141414') };
+  function buildSignal(i, j) {
+    const x = W.roadX(i), y = W.roadY(j);
+    const hw = W.widthX(i) / 2, hh = W.widthY(j) / 2;
+    if (W.riverDist(x, y) < 80) return { heads: [], mesh: null };
+    // [x, z, ось движения, куда смотрит (dx, dz)]
+    const heads = [
+      [x - hw - 7, y + hh + 7, 'h', -1, 0], [x + hw + 7, y - hh - 7, 'h', 1, 0],
+      [x - hw - 7, y - hh - 7, 'v', 0, -1], [x + hw + 7, y + hh + 7, 'v', 0, 1],
+    ];
+    const g = new Geo(), pc = col('#30333a');
+    for (const [px, pz] of heads) {
+      g.box(px - 1.5, 0, pz - 1.5, px + 1.5, 46, pz + 1.5, pc);
+      g.box(px - 3.5, 32, pz - 3.5, px + 3.5, 48, pz + 3.5, col('#15171b'));
+    }
+    const mesh = new THREE.Mesh(g.build(), solidMat);
+    scene.add(mesh);
+    return { i, j, heads, mesh };
+  }
+  function syncSignals(st, T) {
+    const want = new Set();
+    for (let i = W.colAt(T.x - 1700); i <= W.colAt(T.x + 1700) + 1; i++) {
+      for (let j = W.rowAt(T.z - 2000); j <= W.rowAt(T.z + 1000) + 1; j++) {
+        const key = i + ',' + j;
+        want.add(key);
+        if (!signals.has(key)) signals.set(key, buildSignal(i, j));
+      }
+    }
+    for (const [key, e] of signals) if (!want.has(key)) { if (e.mesh) { scene.remove(e.mesh); e.mesh.geometry.dispose(); } signals.delete(key); }
+    let n = 0;
+    for (const e of signals.values()) {
+      if (!e.heads.length) continue;
+      const sst = signalState(e.i, e.j, st.time);
+      for (const [px, pz, ax, dx, dz] of e.heads) {
+        const go = ax === 'h' ? sst === 0 : sst === 2, amber = ax === 'h' ? sst === 1 : sst === 3;
+        const cols = [!go && !amber ? SIG.red : SIG.off, amber ? SIG.yellow : SIG.off, go ? SIG.green : SIG.off];
+        for (let k = 0; k < 3; k++) {
+          if (n >= MAXS) break;
+          tmpP.set(px + dx * 4, 44 - k * 5.2, pz + dz * 4);
+          tmpS.set(4.2, 4.2, 4.2);
+          tmpM.compose(tmpP, tmpQ.identity(), tmpS);
+          sigMesh.setMatrixAt(n, tmpM);
+          sigMesh.setColorAt(n, cols[k]);
+          n++;
+        }
+      }
+    }
+    tmpS.set(1, 1, 1);
+    sigMesh.count = n;
+    sigMesh.instanceMatrix.needsUpdate = true;
+    if (sigMesh.instanceColor) sigMesh.instanceColor.needsUpdate = true;
+  }
   // эффекты
   const fxSmoke = new Particles(scene, 500, new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false }));
   const fxFire = new Particles(scene, 400, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }));
@@ -365,9 +412,7 @@ export function createVoxel(cv) {
       const [cx, cy] = key.split(',').map(Number);
       const x0 = cx * CS, y0 = cy * CS;
       if (l.lx + l.r < x0 || l.lx - l.r > x0 + CS || l.ly + l.r < y0 || l.ly - l.r > y0 + CS) continue;
-      const ch = peekChunk(cx, cy);
-      if (!ch) continue;
-      chunks.set(key, bakeChunk(ch));
+      chunks.set(key, bakeChunk(buildChunkAt(cx, cy)));
       dropChunk(e);
     }
   }
@@ -386,10 +431,10 @@ export function createVoxel(cv) {
     const n = Math.min(SKID_MAX, st.skids.length);
     const off = st.skids.length - n;
     for (let k = 0; k < n; k++) {
-      const [x0, y0, x1, y1] = st.skids[off + k];
+      const [x0, y0, x1, y1, zz] = st.skids[off + k];
       const dx = x1 - x0, dy = y1 - y0, l = Math.hypot(dx, dy) || 1;
-      const px = (-dy / l) * 1.8, py = (dx / l) * 1.8;
-      skidPos.set([x0 + px, 0.5, y0 + py, x0 - px, 0.5, y0 - py, x1 + px, 0.5, y1 + py, x1 - px, 0.5, y1 - py], k * 12);
+      const px = (-dy / l) * 1.8, py = (dx / l) * 1.8, h = (zz || 0) + 0.5;
+      skidPos.set([x0 + px, h, y0 + py, x0 - px, h, y0 - py, x1 + px, h, y1 + py, x1 - px, h, y1 - py], k * 12);
     }
     skidGeo.setDrawRange(0, n * 6);
     skidGeo.attributes.position.needsUpdate = true;
@@ -399,6 +444,7 @@ export function createVoxel(cv) {
       if (f.type === 'sparks') sparks(f.x, 10, f.y, f.n);
       else if (f.type === 'debris') debris(f.x, f.y, f.color, f.n);
       else if (f.type === 'lamp') dropLamp(f.lamp);
+      else if (f.type === 'pane') breakPane(f.pane);
       else if (f.type === 'explode') {
         sparks(f.x, 14, f.y, 70, 260); fire(f.x, 10, f.y, 60, 22); debris(f.x, f.y, '#d8262a', 40, 220);
         for (let k = 0; k < 20; k++) smoke(f.x, 20, f.y, true);
@@ -467,6 +513,7 @@ export function createVoxel(cv) {
     const x0 = ch.cx * CS, y0 = ch.cy * CS, k = TEX / CS;
     const c = canvas(TEX, TEX), g = c.getContext('2d');
     g.drawImage(ch.canvas, 0, 0, TEX, TEX);
+    releaseCanvas(ch);
     // свет: фонари этого чанка, соседних и всех кварталов вокруг
     const lamps = new Set(ch.lamps);
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
@@ -572,21 +619,94 @@ export function createVoxel(cv) {
       const vert = Math.abs(Math.sin(p.a)) > 0.5;
       const hx = (vert ? Wd : L) / 2, hz = (vert ? L : Wd) / 2;
       const c = col(kind === 'truck' ? '#8a9098' : CAR_COLORS[p.spr % CAR_COLORS.length]);
-      solid.box(p.x - hx, 2, p.y - hz, p.x + hx, kind === 'truck' ? 30 : 11, p.y + hz, c);
-      if (kind !== 'truck') solid.box(p.x - hx * (vert ? 0.85 : 0.5), 11, p.y - hz * (vert ? 0.5 : 0.85), p.x + hx * (vert ? 0.85 : 0.5), 18, p.y + hz * (vert ? 0.5 : 0.85), col('#14181e'));
+      const pz = p.z || 0;
+      solid.box(p.x - hx, pz + 2, p.y - hz, p.x + hx, pz + (kind === 'truck' ? 30 : 11), p.y + hz, c);
+      if (kind !== 'truck') solid.box(p.x - hx * (vert ? 0.85 : 0.5), pz + 11, p.y - hz * (vert ? 0.5 : 0.85), p.x + hx * (vert ? 0.85 : 0.5), pz + 18, p.y + hz * (vert ? 0.5 : 0.85), col('#14181e'));
     }
     for (const p of B.props) if (p.t === 'excavator') {
       solid.box(p.x - 12, 0, p.y - 10, p.x + 12, 14, p.y + 10, col('#c89515'));
       solid.box(p.x - 6, 14, p.y - 6, p.x + 6, 24, p.y + 6, col('#1a2430'));
     }
+    const wedge = new Geo();
+    for (const gr of B.garages) addGarage(gr, solid, glow, wedge, B);
     const grp = new THREE.Group();
     if (!solid.empty()) grp.add(new THREE.Mesh(solid.build(), solidMat));
+    if (!wedge.empty()) grp.add(new THREE.Mesh(wedge.build(), solidMat2));
     if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
     if (!glass.empty()) grp.add(new THREE.Mesh(glass.build(), glassMat));
     for (const c of cranes) grp.add(c.jib);
+    const entry = { grp, cranes, B, panes: null };
+    buildPanes(entry);
     scene.add(grp);
-    return { grp, cranes };
+    return entry;
   }
+  // целые стёкла вестибюлей одного квартала — отдельный меш, пересобирается при каждом разбитом стекле
+  function buildPanes(e) {
+    if (e.panes) { e.grp.remove(e.panes); e.panes.geometry.dispose(); e.panes = null; }
+    const g = new Geo();
+    const c = col('#ffffff');
+    for (const p of e.B.panes) if (!p.broken) g.box(p.x, 0.5, p.y, p.x + p.w, p.z1, p.y + p.h, c);
+    if (g.empty()) return;
+    e.panes = new THREE.Mesh(g.build(), paneMat);
+    e.panes.renderOrder = 2;
+    e.grp.add(e.panes);
+  }
+  function breakPane(p) {
+    const e = blocks.get(p.B.i + ',' + p.B.j);
+    if (e) buildPanes(e);
+    const cx = p.x + p.w / 2, cz = p.y + p.h / 2;
+    const gc = new THREE.Color('#bfe6ff');
+    for (let k = 0; k < 26; k++) {
+      const a = Math.random() * 6.283;
+      fxDebris.add({ x: cx + rnd(-p.w / 2, p.w / 2), y: rnd(4, p.z1 - 4), z: cz + rnd(-p.h / 2, p.h / 2), vx: Math.cos(a) * rnd(30, 160), vy: rnd(20, 120), vz: Math.sin(a) * rnd(30, 160), g: 520, life: rnd(1.5, 3), s0: rnd(1.2, 3), s1: rnd(1, 2), col: gc, spin: rnd(-14, 14) });
+    }
+  }
+  // клин пандуса: вершины считаем вручную, материал двусторонний
+  function wedgeBox(G, rp, c) {
+    const { x, y, w, h, dh } = rp;
+    const H = (px, pz) => W.rampHeight(rp, px, pz);
+    const P = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    const top = P.map(([px, pz]) => [px, H(px, pz), pz]);
+    const bot = P.map(([px, pz]) => [px, 0, pz]);
+    const up = [0, 1, 0];
+    G.quad(top[0], top[3], top[2], top[1], up, c, null);
+    for (let k = 0; k < 4; k++) {
+      const k2 = (k + 1) % 4;
+      if (top[k][1] < 0.5 && top[k2][1] < 0.5) continue;
+      const nx = k === 1 ? 1 : k === 3 ? -1 : 0, nz = k === 2 ? 1 : k === 0 ? -1 : 0;
+      G.quad(bot[k], top[k], top[k2], bot[k2], [nx, 0, nz], c, null);
+    }
+    // жёлтые полосы по краям пандуса
+    const yl = col('#c9a227');
+    if (rp.axis === 'x') {
+      for (const zz of [y + 1, y + h - 3]) G.quad([x, H(x, zz) + 0.4, zz], [x, H(x, zz) + 0.4, zz + 2], [x + w, H(x + w, zz) + 0.4, zz + 2], [x + w, H(x + w, zz) + 0.4, zz], up, yl, null);
+    } else {
+      for (const xx of [x + 1, x + w - 3]) G.quad([xx, H(xx, y) + 0.4, y], [xx + 2, H(xx, y) + 0.4, y], [xx + 2, H(xx, y + h) + 0.4, y + h], [xx, H(xx, y + h) + 0.4, y + h], up, yl, null);
+    }
+  }
+  function addGarage(gr, solid, glow, wedge) {
+    const dh = gr.dh, d = gr.deck;
+    const conc = col('#55585e'), top = col('#3e4146'), line = col('#c8c8be');
+    solid.box(d.x, dh - 4, d.y, d.x + d.w, dh, d.y + d.h, conc, top, null, true);
+    for (const c of gr.cols) solid.box(c.x, 0, c.y, c.x + c.w, dh - 4, c.y + c.h, conc);
+    for (const pp of gr.parapets) solid.box(pp.x, dh, pp.y, pp.x + pp.w, dh + 7, pp.y + pp.h, conc);
+    // разметка мест наверху
+    const long = gr.horiz;
+    for (let k = 1; k < 10; k++) {
+      const t = k / 10;
+      if (long) { const x = d.x + d.w * t; solid.box(x - 0.7, dh, d.y + 6, x + 0.7, dh + 0.3, d.y + 50, line); solid.box(x - 0.7, dh, d.y + d.h - 50, x + 0.7, dh + 0.3, d.y + d.h - 6, line); }
+      else { const z = d.y + d.h * t; solid.box(d.x + 6, dh, z - 0.7, d.x + 50, dh + 0.3, z + 0.7, line); solid.box(d.x + d.w - 50, dh, z - 0.7, d.x + d.w - 6, dh + 0.3, z + 0.7, line); }
+    }
+    // светильники на столбиках
+    for (const [lx, ly] of gr.lights) {
+      solid.box(lx - 1.2, dh, ly - 1.2, lx + 1.2, dh + 22, ly + 1.2, col('#4a4e56'));
+      glow.box(lx - 4, dh + 20, ly - 4, lx + 4, dh + 23, ly + 4, glowCol('white', 2.4), glowCol('white', 2.4), null, true);
+    }
+    // лампы под плитой
+    for (const c of gr.cols) glow.box(c.x + 10, dh - 5, c.y - 3, c.x + 22, dh - 4, c.y + 3, glowCol('white', 1.4), glowCol('white', 1.4), null, true);
+    wedgeBox(wedge, B_ramp(gr), conc);
+  }
+  const B_ramp = (gr) => ({ ...gr.ramp, axis: gr.horiz ? 'x' : 'y', dir: gr.flip ? -1 : 1, dh: gr.dh });
 
   function addBuilding(b, solid, glow, glass, cranes) {
     const h = b.height;
@@ -638,7 +758,7 @@ export function createVoxel(cv) {
       return;
     }
     if (b.glass) {
-      const tint = { green: '#6aff9a', cyan: '#7ad8ff', purple: '#c08aff', silver: '#c8d4e8' }[b.glass];
+      const tint = { green: '#1d5a3a', cyan: '#1d4a62', purple: '#3a2a5a', silver: '#34404e' }[b.glass];
       glass.box(x0, 0, z0, x1, h, z1, col(tint), col(tint), [0, 0, 1 / 48, 1 / 48]);
       // огни по рёбрам крыши
       const gc = glowCol('white', 2);
@@ -648,7 +768,16 @@ export function createVoxel(cv) {
       const wall = lighten(b.wall, '#3c4458', 0.35), roof = lighten(b.roof, '#4a5060', 0.25);
       const s = hashU(b.seed, 1, 2);
       const win = b.lit > 0 ? [((s % 32) * 2) / 64, (((s >>> 5) % 32) * 2) / 64, 1 / 7 / 64, 1 / 10 / 64] : null;
-      solid.box(x0, 0, z0, x1, h, z1, wall, roof, win);
+      if (b.lobby) {
+        // верхние этажи на колоннах, внизу освещённый стеклянный холл
+        const L = b.lobby;
+        solid.box(x0, L, z0, x1, h, z1, wall, roof, win, true);
+        const cs = 9;
+        for (const [px, pz] of [[x0, z0], [x1 - cs, z0], [x1 - cs, z1 - cs], [x0, z1 - cs]]) solid.box(px, 0, pz, px + cs, L, pz + cs, wall);
+        solid.box(x0 + 6, 0, z0 + 6, x1 - 6, 0.6, z1 - 6, col('#c8bca0', 0.7));
+        const lc = glowCol('warm', 1.8);
+        for (let x = x0 + 22; x < x1 - 12; x += 34) for (let z = z0 + 22; z < z1 - 12; z += 34) glow.box(x - 5, L - 1.6, z - 5, x + 5, L - 0.6, z + 5, lc, lc, null, true);
+      } else solid.box(x0, 0, z0, x1, h, z1, wall, roof, win);
       // парапет
       solid.box(x0, h, z0, x1, h + 3, z0 + 2, roof); solid.box(x0, h, z1 - 2, x1, h + 3, z1, roof);
       solid.box(x0, h, z0, x0 + 2, h + 3, z1, roof); solid.box(x1 - 2, h, z0, x1, h + 3, z1, roof);
@@ -728,18 +857,22 @@ export function createVoxel(cv) {
 
   function syncCars(st) {
     const seen = new Set();
-    for (const c of st.traffic) {
+    for (const c of [...st.traffic, ...st.cops]) {
       let m = cars.get(c);
       if (!m) {
-        m = carModel(c.kind, c.color);
+        m = carModel(c.kind, c.color, false);
         scene.add(m);
         cars.set(c, m);
       }
-      m.position.set(c.x, 0, c.y);
-      m.rotation.y = -c.a;
+      m.position.set(c.x, c.z || 0, c.y);
+      m.rotation.set(0, -c.a, c.pitch || 0);
       const tm = c.brake ? glowMat('red', 3) : glowMat('red', 1);
       for (const t of m.userData.tail) t.material = tm;
-      if (m.userData.bar) { const on = Math.sin(st.time * 14) > 0; m.userData.bar[0].visible = on; m.userData.bar[1].visible = !on; }
+      if (m.userData.bar) {
+        const on = !c.wreck && Math.sin(st.time * 14 + (c.cop ? 1 : 0)) > 0;
+        m.userData.bar[0].visible = on; m.userData.bar[1].visible = !on && !c.wreck;
+      }
+      if (c.cop) { applyDamage(m, c); }
       seen.add(c);
     }
     for (const [c, m] of cars) if (!seen.has(c)) { scene.remove(m); cars.delete(c); }
@@ -749,13 +882,18 @@ export function createVoxel(cv) {
       playerModel = carModel('sport', '#d8262a', true); scene.add(playerModel); playerGen = P.gen;
     }
     applyDamage(playerModel, P);
-    playerModel.position.set(P.x, 0, P.y);
-    playerModel.rotation.y = -P.a;
+    playerModel.position.set(P.x, P.z, P.y);
+    playerModel.rotation.set(0, -P.a, P.pitch);
+    // тень под машиной в прыжке
+    const sh = W.surfaceAt(P.x, P.y, P.z);
+    shadow.visible = P.z - sh > 2;
+    shadow.position.set(P.x, sh + 0.8, P.y);
+    shadow.rotation.set(-Math.PI / 2, 0, P.a);
+    shadow.material.opacity = Math.max(0.1, 0.5 - (P.z - sh) / 200);
     const tm = P.brake ? glowMat('red', 3.5) : glowMat('red', 1.2);
     for (const t of playerModel.userData.tail) t.material = tm;
   }
 
-  const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpS = new THREE.Vector3(1, 1, 1), tmpP = new THREE.Vector3();
   function syncPeds(st) {
     let n = 0;
     for (const p of st.peds) {
@@ -829,9 +967,9 @@ export function createVoxel(cv) {
       syncTrains(st);
       syncRain(st);
       syncSkids(st);
+      syncSignals(st, T);
       handleFx(st, st.dt);
-      updateProbe(T);
-      composer.render();
+            composer.render();
       return pending;
     },
     dispose() {

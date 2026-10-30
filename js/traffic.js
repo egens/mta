@@ -170,6 +170,7 @@ export function updateTraffic(st, dt) {
     };
     for (const o of st.traffic) if (o !== c && Math.abs(o.x - c.x) < 160 && Math.abs(o.y - c.y) < 160) check(o, o.mode !== 'drive');
     check(P, true);
+    for (const o of st.cops) if (Math.abs(o.x - c.x) < 160 && Math.abs(o.y - c.y) < 160) check(o, true);
     for (const t of st.trains) {
       const ax = c.x + fx * 70, ay = c.y + fy * 70;
       if (ax > t.x - 60 && ax < t.x + 60 && ay > t.y0 - 260 && ay < t.y0 + t.len + 260) target = 0;
@@ -278,7 +279,7 @@ export function updatePeds(st, dt) {
     const fx = Math.cos(P.a), fy = Math.sin(P.a);
     const rx = p.x - P.x, ry = p.y - P.y;
     const along = rx * fx + ry * fy, lat = -rx * fy + ry * fx;
-    if (Math.abs(along) < P.L / 2 + 4 && Math.abs(lat) < P.W / 2 + 4) {
+    if ((P.z || 0) < 10 && Math.abs(along) < P.L / 2 + 4 && Math.abs(lat) < P.W / 2 + 4) {
       if (pv > 70) {
         p.down = 4; p.vx = P.vx * 0.8 + (Math.random() - 0.5) * 80; p.vy = P.vy * 0.8 + (Math.random() - 0.5) * 80; p.a = Math.atan2(p.vy, p.vx);
         st.onPedHit(p);

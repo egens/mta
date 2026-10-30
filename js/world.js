@@ -221,7 +221,7 @@ function genBlock(i, j) {
     lx0: bx0 + SW, ly0: by0 + SW, lx1: bx1 - SW, ly1: by1 - SW,
     cx: (bx0 + bx1) / 2, cy: (by0 + by1) / 2,
     lotColor: PAL.court, ground: [], buildings: [], trees: [], lamps: [], parked: [],
-    props: [], boxes: [], circles: [], ponds: [], type: '',
+    props: [], boxes: [], circles: [], ponds: [], panes: [], ramps: [], garages: [], type: '',
   };
   B.diags = diagsInRect(bx0, by0, bx1, by1, DIAG_W / 2 + SW + 10);
   B.rail = hasRail(i) ? railX(i) : null;
@@ -253,7 +253,6 @@ function genBlock(i, j) {
   if (cut && (type === 'perimeter' || type === 'micro' || type === 'stadium' || type === 'construction')) type = 'mixed';
   B.type = type;
   B.dens = z.dens;
-  B.streetTrees = type !== 'industrial' && type !== 'park' && r() < 0.6;
 
   LAYOUT[type](B, r, z.dens);
   if (B.rail !== null) railFences(B);
@@ -285,6 +284,13 @@ function rectClear(B, x, y, w, h, margin = 4, inLot = true) {
   }
   return true;
 }
+// точка не на диагонали, ж/д и не в реке
+function pointClear(B, x, y, margin) {
+  for (const d of B.diags) if (Math.abs(diagSigned(d, x, y)) < DIAG_W / 2 + SW + margin) return false;
+  if (B.rail !== null && Math.abs(x - B.rail) < RAIL_W / 2 + margin) return false;
+  if (B.river && riverDist(x, y) < margin) return false;
+  return true;
+}
 function hitsSolid(B, x, y, w, h, m = 0) {
   for (const b of B.boxes) if (x < b.x + b.w + m && x + w > b.x - m && y < b.y + b.h + m && y + h > b.y - m) return true;
   return false;
@@ -311,9 +317,27 @@ function addBuilding(B, r, x, y, w, h, height, style, o = {}) {
   const S = STYLE[style];
   if (S) S(b, r);
   B.buildings.push(b);
-  if (!o.noCollide) B.boxes.push({ x, y, w, h });
+  // стеклянный первый этаж: верхние этажи на колоннах, между ними стёкла, которые можно разбить и проехать насквозь
+  if (!o.noCollide && LOBBY_STYLES.has(style) && !b.glass && w >= 60 && h >= 60 && w <= 300 && h <= 300 && height >= 70 && r() < 0.3) {
+    b.lobby = LOBBY_H;
+    B.boxes.push({ x, y, w, h, z0: LOBBY_H, z1: height, top: true });
+    const cs = 9;
+    for (const [px, py] of [[x, y], [x + w - cs, y], [x + w - cs, y + h - cs], [x, y + h - cs]]) B.boxes.push({ x: px, y: py, w: cs, h: cs, z1: LOBBY_H });
+    const edge = (ax, ay, bx, by) => {
+      const len = Math.hypot(bx - ax, by - ay), n = Math.max(1, Math.round(len / 36));
+      for (let k = 0; k < n; k++) {
+        const x0 = ax + ((bx - ax) * k) / n, y0 = ay + ((by - ay) * k) / n, x1 = ax + ((bx - ax) * (k + 1)) / n, y1 = ay + ((by - ay) * (k + 1)) / n;
+        B.panes.push({ x: Math.min(x0, x1) - 1.5, y: Math.min(y0, y1) - 1.5, w: Math.abs(x1 - x0) + 3, h: Math.abs(y1 - y0) + 3, z1: LOBBY_H, broken: false, b, B });
+      }
+    };
+    const i = 5;
+    edge(x + cs, y + i, x + w - cs, y + i); edge(x + cs, y + h - i, x + w - cs, y + h - i);
+    edge(x + i, y + cs, x + i, y + h - cs); edge(x + w - i, y + cs, x + w - i, y + h - cs);
+  } else if (!o.noCollide) B.boxes.push({ x, y, w, h, z1: height, top: true });
   return b;
 }
+const LOBBY_H = 30;
+const LOBBY_STYLES = new Set(['office', 'shop', 'tower', 'resid']);
 
 function addTree(B, x, y, rad, kind) {
   if (!rectClear(B, x - rad * 0.5, y - rad * 0.5, rad, rad, 0)) return false;
@@ -321,7 +345,7 @@ function addTree(B, x, y, rad, kind) {
   if (inKeepout(B, x, y, rad * 0.7)) return false;
   for (const t of B.trees) { const dx = t.x - x, dy = t.y - y; if (dx * dx + dy * dy < (t.r + rad) * (t.r + rad) * 0.35) return false; }
   B.trees.push({ x, y, r: rad, kind, v: (hash(x | 0, y | 0, 5) * 4) | 0 });
-  B.circles.push({ x, y, r: rad * 0.38 });
+  B.circles.push({ x, y, r: rad * 0.38, z1: 40 });
   return true;
 }
 function scatterTrees(B, r, x, y, w, h, count, rmin = 14, rmax = 26, conifer = 0.2) {
@@ -345,8 +369,8 @@ function addParked(B, r, cx, cy, vertical, kind = 'car') {
   if (!rectClear(B, x, y, w, h, 2)) return false;
   if (hitsSolid(B, x, y, w, h, 3)) return false;
   const a = (vertical ? Math.PI / 2 : 0) + (r() < 0.5 ? Math.PI : 0);
-  B.parked.push({ x: cx, y: cy, a, kind, spr: (r() * 1000) | 0 });
-  B.boxes.push({ x, y, w, h });
+  B.parked.push({ x: cx, y: cy, z: 0, a, kind, spr: (r() * 1000) | 0 });
+  B.boxes.push({ x, y, w, h, z1: kind === 'truck' ? 30 : 18, top: true });
   return true;
 }
 
@@ -566,7 +590,7 @@ const LAYOUT = {
         shopLights(B, r, x, y, w, h, 60, 0.6);
         scatterTrees(B, r, P.x, P.y, P.w, P.h, 4, 10, 16, 0);
       } else if (roll < 0.85) plaza(B, r, P);
-      else parking(B, r, P);
+      else if (!garage(B, r, P)) parking(B, r, P);
     }
   },
 
@@ -731,7 +755,7 @@ const LAYOUT = {
       const a = B.rail - RAIL_W / 2 - 16, b = B.rail + RAIL_W / 2 + 16;
       rects = [{ x: L.x, y: L.y, w: a - L.x, h: L.h }, { x: b, y: L.y, w: L.x + L.w - b, h: L.h }];
     }
-    const subs = ['shops', 'shops', 'shops', 'office', 'office', 'parking', 'parking', 'gas', 'square', 'playground', 'church', 'market', 'smallpark', 'smallpark', 'build'];
+    const subs = ['shops', 'shops', 'shops', 'office', 'office', 'parking', 'parking', 'garage', 'gas', 'square', 'playground', 'church', 'market', 'smallpark', 'smallpark', 'build'];
     for (const R of rects) {
       for (const P of bsp(R, 180, 2, r)) {
         if (P.w < 60 || P.h < 60) continue;
@@ -792,6 +816,7 @@ const SUB = {
     addLamp(B, P.x + 8, P.y + 8, P.x + 8, P.y + 8, 120, 'white', 0.7);
   },
   parking(B, r, P) { parking(B, r, P); },
+  garage(B, r, P) { if (!garage(B, r, P)) parking(B, r, P); },
   gas(B, r, P) {
     op(B, { t: 'r', x: P.x, y: P.y, w: P.w, h: P.h, c: PAL.concrete });
     const cw = Math.min(P.w - 40, 130), ch = Math.min(P.h - 60, 80);
@@ -802,7 +827,7 @@ const SUB = {
         for (let k = 0; k < 3; k++) {
           const px = cx + (cw * (k + 0.5)) / 3;
           op(B, { t: 'r', x: px - 4, y: cy + ch / 2 - 8, w: 8, h: 16, c: '#c83a2a' });
-          B.boxes.push({ x: px - 4, y: cy + ch / 2 - 8, w: 8, h: 16 });
+          B.boxes.push({ x: px - 4, y: cy + ch / 2 - 8, w: 8, h: 16, z1: 14 });
         }
         addLamp(B, cx + cw / 2, cy + ch / 2, cx + cw / 2, cy + ch / 2, 230, 'white', 1, false);
         c.glows.push({ x: cx + 10, y: cy + 10, r: 30, c: r.pick(['green', 'red', 'yellow']), i: 0.8 });
@@ -885,7 +910,7 @@ function plaza(B, r, P) {
     op(B, { t: 'c', x: cx, y: cy, r: fr + 6, c: '#9a948a' });
     op(B, { t: 'c', x: cx, y: cy, r: fr, c: '#2a8aa8' });
     op(B, { t: 'c', x: cx, y: cy, r: fr * 0.3, c: '#cfeaf2' });
-    B.circles.push({ x: cx, y: cy, r: fr + 6 });
+    B.circles.push({ x: cx, y: cy, r: fr + 6, z1: 10 });
     addLamp(B, cx, cy, cx, cy, fr * 2.6, 'cyan', 0.6, false);
     keep(B, cx - fr - 10, cy - fr - 10, fr * 2 + 20, fr * 2 + 20);
   }
@@ -913,6 +938,113 @@ function parking(B, r, P) {
   for (let x = P.x + 40; x < P.x + P.w - 20; x += 140) for (let y = P.y + 30; y < P.y + P.h - 20; y += 160) {
     if (!hitsSolid(B, x - 4, y - 4, 8, 8)) addLamp(B, x, y, x, y, 160, 'white', 0.8);
   }
+}
+
+// Двухэтажная парковка: нижний ярус под плитой на колоннах, верхний — с пандусом.
+// Дальний край верхнего яруса без ограждения — с него и с пандуса можно прыгать.
+const DECK_H = 34;
+function garage(B, r, P) {
+  // въезд на пандус должен выходить на улицу: нижний конец пандуса — у края квартала
+  const opts = [];
+  if (P.w >= 200 && P.h >= 150) {
+    if (Math.abs(P.x - B.lx0) < 2) opts.push([true, false]);
+    if (Math.abs(P.x + P.w - B.lx1) < 2) opts.push([true, true]);
+  }
+  if (P.h >= 200 && P.w >= 150) {
+    if (Math.abs(P.y - B.ly0) < 2) opts.push([false, false]);
+    if (Math.abs(P.y + P.h - B.ly1) < 2) opts.push([false, true]);
+  }
+  if (!opts.length) return false;
+  const [horiz, flip] = opts[Math.floor(r() * opts.length)];
+  const U = horiz ? P.w : P.h, V = horiz ? P.h : P.w;
+  const rampLen = 100, rampW = 46;
+  // в осях (u — вдоль пандуса, v — поперёк)
+  const map = (u, v, du, dv) => {
+    if (flip) u = U - u - du;
+    return horiz ? { x: P.x + u, y: P.y + v, w: du, h: dv } : { x: P.x + v, y: P.y + u, w: dv, h: du };
+  };
+  const ramp = map(12, V / 2 - rampW / 2, rampLen, rampW);
+  const deck = map(12 + rampLen, 12, U - 24 - rampLen, V - 24);
+  if (deck.w < 80 || deck.h < 80) return false;
+  if (!rectClear(B, P.x + 6, P.y + 6, P.w - 12, P.h - 12, 6)) return false;
+  op(B, { t: 'r', x: P.x, y: P.y, w: P.w, h: P.h, c: PAL.lotAsph });
+  for (let k = 0; k < 12; k++) {
+    const t = (k + 0.5) / 12;
+    const st = map(12 + rampLen + (U - 24 - rampLen) * t, 18, 1.5, V - 36);
+    op(B, { t: 'r', ...st, c: 'rgba(230,230,220,0.5)' });
+  }
+  const g = { deck, ramp, dh: DECK_H, horiz, flip, cols: [], parapets: [], lights: [] };
+  // колонны
+  const nu = Math.max(2, Math.round(deck.w / 75)), nv = Math.max(2, Math.round(deck.h / 75));
+  for (let a = 0; a <= nu; a++) for (let c = 0; c <= nv; c++) {
+    const x = deck.x + 4 + ((deck.w - 16) * a) / nu, y = deck.y + 4 + ((deck.h - 16) * c) / nv;
+    const col = { x, y, w: 8, h: 8, z1: DECK_H - 4 };
+    g.cols.push(col); B.boxes.push(col);
+  }
+  // плита: снизу проезд, сверху — поверхность
+  B.boxes.push({ x: deck.x, y: deck.y, w: deck.w, h: deck.h, z0: DECK_H - 4, z1: DECK_H, top: true, noSide: true });
+  // ограждение по трём сторонам, разрыв у пандуса; дальний край открыт
+  const t = 3, top = DECK_H + 7;
+  const near = flip ? (horiz ? 'r' : 'b') : (horiz ? 'l' : 't');
+  const far = flip ? (horiz ? 'l' : 't') : (horiz ? 'r' : 'b');
+  const sides = {
+    t: { x: deck.x, y: deck.y, w: deck.w, h: t }, b: { x: deck.x, y: deck.y + deck.h - t, w: deck.w, h: t },
+    l: { x: deck.x, y: deck.y, w: t, h: deck.h }, r: { x: deck.x + deck.w - t, y: deck.y, w: t, h: deck.h },
+  };
+  for (const k of ['t', 'b', 'l', 'r']) {
+    if (k === far) continue;
+    const s0 = sides[k];
+    if (k === near) {
+      // две части по бокам от въезда с пандуса
+      if (horiz) {
+        g.parapets.push({ x: s0.x, y: s0.y, w: t, h: ramp.y - s0.y }, { x: s0.x, y: ramp.y + ramp.h, w: t, h: s0.y + s0.h - ramp.y - ramp.h });
+      } else {
+        g.parapets.push({ x: s0.x, y: s0.y, w: ramp.x - s0.x, h: t }, { x: ramp.x + ramp.w, y: s0.y, w: s0.x + s0.w - ramp.x - ramp.w, h: t });
+      }
+    } else g.parapets.push(s0);
+  }
+  for (const pp of g.parapets) B.boxes.push({ ...pp, z0: DECK_H, z1: top });
+  B.ramps.push({ ...ramp, axis: horiz ? 'x' : 'y', dir: flip ? -1 : 1, dh: DECK_H });
+  B.garages.push(g);
+  // машины на верхнем ярусе вдоль бортов
+  const rowV = [12 + 14, V - 12 - 14];
+  for (const v of rowV) for (let u = 12 + rampLen + 30; u < U - 12 - 50; u += 30) {
+    if (r() < 0.45) continue;
+    const c = map(u, v - 23, 0, 46);
+    const cx = c.x, cy = c.y + (horiz ? 23 : 0), cxx = horiz ? cx : c.x + 23;
+    const px = horiz ? cx : cxx, py = horiz ? cy : c.y;
+    B.parked.push({ x: px, y: py, z: DECK_H, a: (horiz ? Math.PI / 2 : 0) + (r() < 0.5 ? Math.PI : 0), kind: 'car', spr: (r() * 1000) | 0 });
+    const w = horiz ? 22 : 46, h = horiz ? 46 : 22;
+    B.boxes.push({ x: px - w / 2, y: py - h / 2, w, h, z0: DECK_H, z1: DECK_H + 18, top: true });
+  }
+  for (let k = 0; k < 4; k++) {
+    const lx = deck.x + deck.w * (0.2 + 0.6 * (k % 2)), ly = deck.y + deck.h * (0.25 + 0.5 * (k >> 1));
+    g.lights.push([lx, ly]);
+    addLamp(B, lx, ly, lx, ly, 150, 'white', 0.7, false);
+  }
+  return true;
+}
+
+// Высота опорной поверхности под точкой: земля, крыши, верхние ярусы, пандусы.
+// Поверхность учитывается, только если машина не ниже её больше чем на «ступеньку».
+export function rampHeight(rp, x, y) {
+  let t = rp.axis === 'x' ? (x - rp.x) / rp.w : (y - rp.y) / rp.h;
+  t = clamp(t, 0, 1);
+  return rp.dh * (rp.dir > 0 ? t : 1 - t);
+}
+export function surfaceAt(x, y, z) {
+  const B = blockAt(x, y);
+  let s = 0;
+  for (const b of B.boxes) {
+    if (!b.top || x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) continue;
+    if (z >= b.z1 - 14 && b.z1 > s) s = b.z1;
+  }
+  for (const rp of B.ramps) {
+    if (x < rp.x || x > rp.x + rp.w || y < rp.y || y > rp.y + rp.h) continue;
+    const h = rampHeight(rp, x, y);
+    if (z >= h - 14 && h > s) s = h;
+  }
+  return s;
 }
 
 function parkIn(B, r, P, big) {
@@ -959,7 +1091,7 @@ function parkIn(B, r, P, big) {
     op(B, { t: 'c', x: cx, y: cy, r: 14, c: '#9a948a' });
     op(B, { t: 'c', x: cx, y: cy, r: 10, c: '#2a8aa8' });
     addLamp(B, cx, cy, cx, cy, 60, 'cyan', 0.8, false);
-    B.circles.push({ x: cx, y: cy, r: 14 });
+    B.circles.push({ x: cx, y: cy, r: 14, z1: 10 });
   }
   B.paths = (B.paths || []).concat(pathPts);
   const count = Math.floor((P.w * P.h) / 3600);
@@ -986,10 +1118,26 @@ function constructionIn(B, r, P) {
       const gx = ((bx - ax) / len) * 30, gy = ((by - ay) / len) * 30;
       segs.push([ax, ay, mx - gx, my - gy], [mx + gx, my + gy, bx, by]);
     } else segs.push([ax, ay, bx, by]);
+    // режем забор там, где через участок проходит улица, ж/д или река
+    const cut = [];
     for (const [x0, y0, x1, y1] of segs) {
+      const len = Math.hypot(x1 - x0, y1 - y0), n = Math.max(1, Math.ceil(len / 8));
+      let st = null;
+      for (let k = 0; k <= n; k++) {
+        const t = k / n, px = x0 + (x1 - x0) * t, py = y0 + (y1 - y0) * t;
+        const ok = pointClear(B, px, py, 14);
+        if (ok && st === null) st = t;
+        if ((!ok || k === n) && st !== null) {
+          const te = ok ? 1 : (k - 1) / n;
+          if (te - st > 0.02) cut.push([x0 + (x1 - x0) * st, y0 + (y1 - y0) * st, x0 + (x1 - x0) * te, y0 + (y1 - y0) * te]);
+          st = null;
+        }
+      }
+    }
+    for (const [x0, y0, x1, y1] of cut) {
       op(B, { t: 'l', pts: [x0, y0, x1, y1], c: '#8f8f7c', lw: 3, cap: 'butt' });
       const bx0 = Math.min(x0, x1) - 2, by0 = Math.min(y0, y1) - 2;
-      B.boxes.push({ x: bx0, y: by0, w: Math.abs(x1 - x0) + 4, h: Math.abs(y1 - y0) + 4 });
+      B.boxes.push({ x: bx0, y: by0, w: Math.abs(x1 - x0) + 4, h: Math.abs(y1 - y0) + 4, z1: 22 });
       const len = Math.hypot(x1 - x0, y1 - y0);
       for (let t = 30; t < len; t += 120) addLamp(B, x0 + ((x1 - x0) * t) / len, y0 + ((y1 - y0) * t) / len, x0 + ((x1 - x0) * t) / len, y0 + ((y1 - y0) * t) / len, 22, 'yellow', 0.9, false, 1);
     }
@@ -1020,9 +1168,9 @@ function constructionIn(B, r, P) {
   }
   if (r() < 0.8) {
     const ex = r.range(L.x + 40, L.x + L.w - 40), ey = r.range(L.y + 40, L.y + L.h - 40);
-    if (!hitsSolid(B, ex - 20, ey - 20, 40, 40)) {
+    if (!hitsSolid(B, ex - 20, ey - 20, 40, 40) && pointClear(B, ex, ey, 30)) {
       B.props.push({ t: 'excavator', x: ex, y: ey, a: r() * 6.28 });
-      B.circles.push({ x: ex, y: ey, r: 16 });
+      B.circles.push({ x: ex, y: ey, r: 16, z1: 26 });
     }
   }
   for (const [px, py] of [[L.x + 10, L.y + 10], [L.x + L.w - 10, L.y + L.h - 10]]) addLamp(B, px, py, px + (L.w > 0 ? 40 : 0), py + 40, 280, 'white', 0.9);
@@ -1057,16 +1205,6 @@ function streetLamps(B, r) {
     for (let t = off; t < len - 40; t += sp) {
       const x = ax + dx * t, y = ay + dy * t;
       if (!bad(x, y)) addLamp(B, x, y, x + nx * 20, y + ny * 20, ave ? 140 : 125, sodium ? 'sodium' : 'white', 0.85);
-      if (B.streetTrees) {
-        const tt = t + sp / 2;
-        if (tt < len - 40) {
-          const tx = ax + dx * tt - nx * 5, ty = ay + dy * tt - ny * 5;
-          if (!bad(tx, ty) && !hitsSolid(B, tx - 8, ty - 8, 16, 16)) {
-            B.trees.push({ x: tx, y: ty, r: r.range(12, 16), kind: 0, v: (r() * 4) | 0 });
-            B.circles.push({ x: tx, y: ty, r: 5 });
-          }
-        }
-      }
     }
   }
 }

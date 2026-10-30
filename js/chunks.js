@@ -4,7 +4,7 @@ import { PAL, SW, DIAG_W, RAIL_W, RP } from './world.js';
 import { hash } from './util.js';
 
 export const CS = 512;
-const MAX_CHUNKS = 96;
+const MAX_CHUNKS = 700;
 const TAU = Math.PI * 2;
 const cache = new Map();
 let tick = 0;
@@ -15,11 +15,16 @@ export function peekChunk(cx, cy) {
   if (ch) ch.used = tick;
   return ch || null;
 }
+// Чанк хранит список фонарей (с состоянием «сломан») дольше, чем свою текстуру:
+// после запекания текстура освобождается, а при повторном запросе перерисовывается
+// без пересоздания фонарей.
 export function buildChunkAt(cx, cy) {
   const key = chunkKey(cx, cy);
   let ch = cache.get(key);
-  if (ch) return ch;
-  ch = buildChunk(cx, cy);
+  if (ch && ch.canvas) { ch.used = tick; return ch; }
+  const fresh = buildChunk(cx, cy);
+  if (ch) { ch.canvas = fresh.canvas; ch.used = tick; return ch; }
+  ch = fresh;
   ch.used = tick;
   cache.set(key, ch);
   if (cache.size > MAX_CHUNKS) {
@@ -29,6 +34,7 @@ export function buildChunkAt(cx, cy) {
   }
   return ch;
 }
+export function releaseCanvas(ch) { ch.canvas = null; }
 export function nextTick() { tick++; }
 
 function buildChunk(cx, cy) {

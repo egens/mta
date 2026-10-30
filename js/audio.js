@@ -102,6 +102,19 @@ export function createAudio() {
     N.city = gain(0.035);
     chain(cityN, filter('lowpass', 160, 0.5), N.city, master);
 
+    // ---- сирена полиции: «вой» с медленной модуляцией
+    N.siren = gain(0);
+    const so = ac.createOscillator(); so.type = 'square'; so.frequency.value = 950;
+    const lfo = ac.createOscillator(); lfo.frequency.value = 0.45;
+    const lfoG = gain(330);
+    chain(lfo, lfoG); lfoG.connect(so.frequency);
+    const so2 = ac.createOscillator(); so2.type = 'triangle'; so2.frequency.value = 1900;
+    const lfo2G = gain(660); lfo.connect(lfo2G); lfo2G.connect(so2.frequency);
+    const sMix = gain(0.5);
+    so.connect(sMix); so2.connect(sMix);
+    chain(sMix, filter('bandpass', 1300, 0.8), N.siren, master);
+    for (const o of [so, so2, lfo]) o.start();
+
     // ---- клаксон: два тона, искажение, «рупор»
     N.horn = gain(0);
     const hShape = shaper(3);
@@ -229,6 +242,7 @@ export function createAudio() {
       for (let i = 0; i < 6; i++) burst('bandpass', 300 + Math.random() * 800, 1, 0.15, 0.002, 0.3, 0.1 + Math.random() * 0.8);
       this.glass(1);
     },
+    siren(level) { if (ac) N.siren.gain.setTargetAtTime(muted ? 0 : level * level * 0.07, ac.currentTime, 0.2); },
     horn(on) { if (ac) N.horn.gain.setTargetAtTime(on && !muted ? 0.09 : 0, ac.currentTime, 0.015); },
     toggle() { muted = !muted; return muted; },
   };
