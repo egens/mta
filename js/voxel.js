@@ -1059,6 +1059,42 @@ export function createVoxel(cv) {
     for (const t of playerModel.userData.tail) t.material = tm;
   }
 
+  // маркеры заданий: световые столбы с кольцом на земле, вращающиеся бонусы, стрелки над целями
+  const markPool = [];
+  const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true).translate(0, 0.5, 0);
+  const ringGeo = new THREE.RingGeometry(0.86, 1, 40).rotateX(-Math.PI / 2);
+  const arrowGeo = new THREE.ConeGeometry(9, 18, 4).rotateX(Math.PI);
+  const pickGeo = new THREE.OctahedronGeometry(9);
+  function markMesh() {
+    const add = (geo, opacity) => { const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false })); scene.add(m); return m; };
+    return { beam: add(beamGeo, 0.22), ring: add(ringGeo, 0.9), arrow: add(arrowGeo, 0.95), pick: add(pickGeo, 0.95) };
+  }
+  function syncMarkers(st) {
+    const list = st.markers || [];
+    while (markPool.length < list.length) markPool.push(markMesh());
+    markPool.forEach((m, k) => {
+      const mk = list[k];
+      const on = !!mk;
+      for (const o of Object.values(m)) o.visible = false;
+      if (!on) return;
+      const c = glowCol('white', 1).set(mk.col).multiplyScalar(mk.k || 2);
+      for (const o of Object.values(m)) o.material.color.copy(c);
+      const pulse = 1 + Math.sin(st.time * 5) * 0.06;
+      if (mk.kind === 'beam') {
+        m.beam.visible = m.ring.visible = true;
+        m.beam.position.set(mk.x, 0, mk.y); m.beam.scale.set(mk.r * 0.75, 420, mk.r * 0.75);
+        m.ring.position.set(mk.x, 1.5, mk.y); m.ring.scale.set(mk.r * pulse, 1, mk.r * pulse);
+      } else if (mk.kind === 'pickup') {
+        m.pick.visible = m.ring.visible = true;
+        m.pick.position.set(mk.x, 16 + Math.sin(st.time * 3 + mk.x) * 3, mk.y); m.pick.rotation.y = st.time * 2.5;
+        m.ring.position.set(mk.x, 1.5, mk.y); m.ring.scale.set(mk.r * 0.7 * pulse, 1, mk.r * 0.7 * pulse);
+      } else {
+        m.arrow.visible = true;
+        m.arrow.position.set(mk.x, 52 + Math.sin(st.time * 6) * 5, mk.y); m.arrow.rotation.y = st.time * 2;
+      }
+    });
+  }
+
   function syncPeds(st) {
     let n = 0;
     for (const p of st.peds) {
@@ -1133,6 +1169,7 @@ export function createVoxel(cv) {
       syncTrains(st);
       syncRain(st);
       syncSkids(st);
+      syncMarkers(st);
       if (osm) syncSignalsOSM(st, T); else syncSignals(st, T);
       handleFx(st, st.dt);
             composer.render();

@@ -37,11 +37,30 @@
   #toast { position: fixed; left: 50%; top: 22%; transform: translateX(-50%); font-size: 22px; font-weight: 700;
     color: #fff; text-shadow: 0 0 12px var(--pink), 2px 2px 0 #000; opacity: 0; transition: opacity .3s; pointer-events: none; }
   #toast.show { opacity: 1; }
-  #stats { position: fixed; left: 18px; top: 56px; font: 12px monospace; color: #8f8; text-shadow: 1px 1px 0 #000; }
+  #money { position: fixed; top: 54px; left: 18px; font-size: 22px; font-weight: 800; color: #7dffaa; text-shadow: 0 0 10px rgba(60,255,140,0.6), 2px 2px 0 #000; font-variant-numeric: tabular-nums; }
+  #mission { --mc: #ffd24a; position: fixed; top: 58px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; background: rgba(8,10,20,0.72); border: 1px solid var(--mc); border-radius: 10px; box-shadow: 0 0 14px color-mix(in srgb, var(--mc) 45%, transparent);
+    max-width: calc(100vw - 32px); }
+  #mission .ar { font-size: 22px; color: var(--mc); text-shadow: 0 0 8px var(--mc); width: 24px; text-align: center; }
+  #mission .t { font-size: 14px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--mc); }
+  #mission .l { font-size: 15px; color: #fff; }
+  #mission .tm { font-size: 26px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; text-shadow: 0 0 10px var(--mc); }
+  #mission.danger { animation: pulse .3s infinite; border-color: #ff3030; }
+  #big { position: fixed; left: 50%; top: 32%; transform: translate(-50%, -50%) scale(.9); text-align: center; opacity: 0; transition: opacity .35s, transform .35s; pointer-events: none; }
+  #big.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #big b { display: block; font-size: clamp(28px, 6vw, 52px); letter-spacing: .08em; color: #fff; text-shadow: 0 0 18px var(--hud), 3px 3px 0 #000; }
+  #big span { display: block; margin-top: 6px; font-size: 18px; color: #e8e8f0; text-shadow: 2px 2px 0 #000; }
+  #big.win b { text-shadow: 0 0 18px #3cff8c, 3px 3px 0 #000; }
+  #big.fail b { color: #ff6a6a; text-shadow: 0 0 18px #ff2020, 3px 3px 0 #000; }
+  #big.start b { text-shadow: 0 0 18px var(--cyan), 3px 3px 0 #000; }
+  #bonus { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); text-align: center; pointer-events: none; }
+  #bonus div { font-size: 20px; font-weight: 800; color: #ffd24a; text-shadow: 0 0 10px #ff8a2a, 2px 2px 0 #000; }
+  body.touch #bonus { bottom: 200px; }
+  #stats { position: fixed; left: 18px; top: 88px; font: 12px monospace; color: #8f8; text-shadow: 1px 1px 0 #000; }
   #hint { position: fixed; left: 18px; bottom: 14px; font-size: 13px; color: #99a; text-shadow: 1px 1px 0 #000; }
   body.touch #hint { display: none; }
 
-  #help { position: fixed; left: 18px; top: 64px; padding: 14px 18px; background: rgba(8,10,20,0.82);
+  #help { position: fixed; left: 18px; top: 92px; padding: 14px 18px; background: rgba(8,10,20,0.82);
     border: 1px solid rgba(255,210,122,0.35); border-radius: 10px; font-size: 14px; line-height: 1.7; }
   #help b { color: var(--hud); display: inline-block; min-width: 92px; }
 
@@ -82,6 +101,10 @@
 <div id="stars"></div>
 <div id="speedo"><div id="speed">0</div><small>КМ/Ч</small><div id="hp"><div id="hpbar"></div></div><div id="odo"></div></div>
 <div id="toast"></div>
+<div id="money"></div>
+<div id="mission" class="hidden"><div class="ar">➤</div><div class="txt"><div class="t"></div><div class="l"></div></div><div class="tm"></div></div>
+<div id="big"></div>
+<div id="bonus"></div>
 <div id="hint">H — управление · T — дождь · R — новая машина · M — звук</div>
 <div id="stats" class="hidden"></div>
 <div id="help" class="hidden">
@@ -104,7 +127,7 @@
 <div id="intro">
   <h1>НОЧНОЙ <span>ГОРОД</span></h1>
   <p>Бесконечный город, который строится прямо перед капотом. Воксельный ночной мегаполис: проспекты, диагонали, реки и мосты, парки, стройки, промзоны, стеклянные башни. Машина мнётся от ударов, фонари можно снести, через стеклянные холлы — проехать, с парковок — прыгнуть. За хулиганство — погоня.</p>
-  <p>WASD / стрелки — ехать, пробел — ручник.</p>
+  <p>WASD / стрелки — ехать, пробел — ручник. Цветные столбы света — заказы: заезжайте в круг, чтобы начать задание.</p>
   <div id="modes-intro">
     <button id="go-city">Процедурный город</button>
     <span class="moscow-pick"><button id="go-moscow">Москва (OpenStreetMap)</button><select id="place"></select></span>

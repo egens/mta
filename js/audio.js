@@ -242,6 +242,16 @@ export function createAudio() {
       for (let i = 0; i < 6; i++) burst('bandpass', 300 + Math.random() * 800, 1, 0.15, 0.002, 0.3, 0.1 + Math.random() * 0.8);
       this.glass(1);
     },
+    // сигналы заданий: взял бонус, задание выполнено, провалено, тик таймера
+    chime(kind) {
+      if (!ac || muted) return;
+      if (kind === 'pickup') { ping(880, 0.06, 0.15); ping(1320, 0.06, 0.25, 0.07); }
+      else if (kind === 'start') { ping(660, 0.06, 0.2, 0, 'triangle'); ping(990, 0.06, 0.3, 0.1, 'triangle'); }
+      else if (kind === 'win') [523, 659, 784, 1047].forEach((f, i) => ping(f, 0.07, 0.4, i * 0.09, 'triangle'));
+      else if (kind === 'fail') [392, 330, 262].forEach((f, i) => ping(f, 0.08, 0.45, i * 0.14, 'triangle'));
+      else if (kind === 'tick') ping(1400, 0.03, 0.05);
+      else if (kind === 'stunt') { ping(1046, 0.04, 0.12); ping(1568, 0.04, 0.18, 0.05); }
+    },
     siren(level) { if (ac) N.siren.gain.setTargetAtTime(muted ? 0 : level * level * 0.07, ac.currentTime, 0.2); },
     horn(on) { if (ac) N.horn.gain.setTargetAtTime(on && !muted ? 0.09 : 0, ac.currentTime, 0.015); },
     toggle() { muted = !muted; return muted; },

@@ -770,7 +770,7 @@ export const osmMap = {
     }
     return out;
   },
-  lampsNear(x0, y0, x1, y1, cb) { for (const l of lampsIn(x0, y0, x1, y1)) cb(l); },
+  lampsNear(x0, y0, x1, y1, cb) { for (const l of lampsIn(x0, y0, x1, y1)) if (!l.dead) cb(l); },
   nav: {
     nearest(x, y) { const n = nearestNode(x, y); return n ? n.id : null; },
     pos(id) { const n = graph.get(id); return n ? [n.x, n.y] : [0, 0]; },
@@ -837,24 +837,91 @@ export function groundChunk(gx, gy) {
     if (r.bridge) { g.strokeStyle = '#a4a6aa'; g.lineWidth = 4; g.save(); g.setLineDash([]); line(r.pts); g.restore(); }
   }
   for (const r of roads) if (r.hw !== 'pedestrian') { g.strokeStyle = '#2d2f34'; g.lineWidth = r.w; line(r.pts); }
-  for (const r of roads) {
-    if (r.hw === 'pedestrian' || r.w < 60) continue;
-    g.strokeStyle = 'rgba(214,214,204,0.85)';
-    if (r.oneway) continue;
-    g.lineWidth = 3;
-    if (r.w >= 110) line(r.pts);
-    else { g.setLineDash([30, 30]); line(r.pts); g.setLineDash([]); }
-  }
+  drawMarkings(g, roads, X0, Y0, X1, Y1);
   for (const r of rails) if (r.tram) { g.strokeStyle = '#8a8c90'; g.lineWidth = 2; for (const o of [-7, 7]) { g.save(); g.translate(o * 0.7, o * 0.7); line(r.pts); g.restore(); } }
   for (const r of rails) if (!r.water && !r.tram) { g.strokeStyle = '#a2a2aa'; g.lineWidth = 2.5; line(r.pts); }
   const blds = [];
   for (const t of tilesIn(x0 - 3000, y0 - 3000, x0 + GC + 3000, y0 + GC + 3000)) for (const b of t.buildings) if (b.x < x0 + GC + 20 && b.x + b.w > x0 - 20 && b.y < y0 + GC + 20 && b.y + b.h > y0 - 20) blds.push(b);
   const inBuilding = (x, y) => blds.some((b) => x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h && pointInRings([b.pts], x, y));
+  // столб не ставим в воду, в дом, на проезжую часть и на узкий разделитель между половинами проспекта
   const lamps = [...lampsIn(x0, y0, x0 + GC, y0 + GC)].filter((l) => l.x >= x0 && l.x < x0 + GC && l.y >= y0 && l.y < y0 + GC && !l.dead
-    && !(l.dead = isWater(l.x, l.y) || inBuilding(l.x, l.y) || inBuilding(l.lx, l.ly)));
+    && !(l.dead = isWater(l.x, l.y) || onCarway(l.x, l.y, 20, l.road) || inBuilding(l.x, l.y) || inBuilding(l.lx, l.ly)));
   ch = { gx, gy, x0, y0, size: GC, canvas: cv, lamps };
   groundCache.set(key, ch);
   return ch;
+}
+// линия, сдвинутая вбок на d (влево по ходу), с подрезкой острых углов
+function offsetLine(p, d) {
+  const n = p.length / 2, out = [];
+  for (let i = 0; i < n; i++) {
+    let nx = 0, ny = 0, cnt = 0;
+    const segN = [];
+    for (const j of [i - 1, i]) {
+      if (j < 0 || j >= n - 1) continue;
+      const ex = p[j * 2 + 2] - p[j * 2], ey = p[j * 2 + 3] - p[j * 2 + 1], l = Math.hypot(ex, ey) || 1;
+      segN.push([-ey / l, ex / l]); nx += -ey / l; ny += ex / l; cnt++;
+    }
+    const l = Math.hypot(nx, ny);
+    if (!cnt || l < 1e-6) { out.push(p[i * 2], p[i * 2 + 1]); continue; }
+    nx /= l; ny /= l;
+    const cos = Math.max(0.5, nx * segN[0][0] + ny * segN[0][1]);
+    out.push(p[i * 2] + (nx * d) / cos, p[i * 2 + 1] + (ny * d) / cos);
+  }
+  return out;
+}
+// Разметка: осевая (двойная сплошная на широких), пунктир между полосами, края проезжей части.
+// На перекрёстках линии обрываются: у каждой дороги вырезаем круги по ширине пересекающих улиц.
+function drawMarkings(g, roads, X0, Y0, X1, Y1) {
+  const cuts = new Map();
+  for (const n of nodesIn(X0, Y0, X1, Y1)) {
+    if (!n.nav || n.nav.size < 3) continue;
+    const inc = new Set();
+    for (const id of n.nav) { const m = graph.get(id); const ed = n.adj.get(id) || (m && m.adj.get(n.id)); if (ed) inc.add(ed.road); }
+    for (const r of inc) {
+      let w = 0;
+      for (const o of inc) if (o !== r && !(o.hw === r.hw && o.w === r.w)) w = Math.max(w, o.w);
+      if (w) (cuts.get(r) || cuts.set(r, []).get(r)).push([n.x, n.y, w / 2 + 12]);
+    }
+  }
+  const path = (pts) => { g.beginPath(); g.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1]); g.stroke(); };
+  const stroke = (pts, d, dash, width = 2.6) => { g.lineWidth = width; g.setLineDash(dash || []); path(d ? offsetLine(pts, d) : pts); };
+  const DASH = [36, 64];
+  g.save();
+  g.lineCap = 'butt';
+  for (const r of roads) {
+    if (r.hw === 'pedestrian' || r.kind !== 'car' || r.w < 60) continue;
+    const cut = cuts.get(r);
+    if (cut) {
+      g.save(); g.beginPath(); g.rect(X0, Y0, X1 - X0, Y1 - Y0);
+      for (const [x, y, rad] of cut) { g.moveTo(x + rad, y); g.arc(x, y, rad, 0, Math.PI * 2, true); }
+      g.clip('evenodd');
+    }
+    g.strokeStyle = 'rgba(214,214,204,0.85)';
+    const hw = r.w / 2, major = r.rank <= 5;
+    if (!r.oneway) {
+      let N = r.lanes || Math.max(2, Math.round(r.w / 35));
+      N = Math.max(2, 2 * Math.round(N / 2));
+      const lw = r.w / N;
+      if (N >= 4) { stroke(r.pts, 2.5, null, 2.2); stroke(r.pts, -2.5, null, 2.2); } else stroke(r.pts, 0, DASH);
+      if (major) for (let k = 1; k < N / 2; k++) { stroke(r.pts, k * lw, DASH); stroke(r.pts, -k * lw, DASH); }
+      if (N >= 4) { g.strokeStyle = 'rgba(214,214,204,0.55)'; stroke(r.pts, hw - 5, null, 2); stroke(r.pts, -hw + 5, null, 2); }
+    } else if (major) {
+      const N = r.lanes || Math.max(1, Math.round(r.w / 35)), lw = r.w / N;
+      for (let k = 1; k < N; k++) stroke(r.pts, -hw + k * lw, DASH);
+      if (N >= 3) { g.strokeStyle = 'rgba(214,214,204,0.55)'; stroke(r.pts, hw - 5, null, 2); stroke(r.pts, -hw + 5, null, 2); }
+    }
+    if (cut) g.restore();
+  }
+  g.restore();
+}
+function onCarway(x, y, extra, own) {
+  for (const r of binQuery('roads', x - 1, y - 1, x + 1, y + 1)) {
+    if (r.kind !== 'car') continue;
+    const e = r === own ? 8 : extra;
+    const p = r.pts;
+    for (let i = 2; i < p.length; i += 2) if (distSeg(x, y, p[i - 2], p[i - 1], p[i], p[i + 1]) < r.w / 2 + e) return true;
+  }
+  return false;
 }
 export function groundLampsAround(x0, y0, x1, y1) { return [...lampsIn(x0, y0, x1, y1)]; }
 export function releaseGround(ch) { ch.canvas = null; }

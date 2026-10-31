@@ -12,6 +12,7 @@ import { MAP, useMap } from './map.js';
 import { procMap } from './procmap.js';
 import * as OSM from './osm.js';
 import { updateTrafficOSM, updatePedsOSM } from './osmtraffic.js';
+import { createMissions } from './missions.js';
 
 // режим карты: процедурный город или Москва (?map=moscow&at=N)
 const params = new URLSearchParams(location.search);
@@ -30,6 +31,10 @@ const hudStats = document.getElementById('stats');
 const hudHp = document.getElementById('hpbar');
 const hudHpBox = document.getElementById('hp');
 const hudStars = document.getElementById('stars');
+const hudMoney = document.getElementById('money');
+const hudMission = document.getElementById('mission');
+const hudBig = document.getElementById('big');
+const hudBonus = document.getElementById('bonus');
 
 initSprites();
 const audio = createAudio();
@@ -55,6 +60,7 @@ const st = {
     this.shake = 20;
     audio.explode();
     toast('Машина разбита! Новая через пару секунд…');
+    missions.onWreck();
   },
   onLampBreak(l, sp, byPlayer = true) {
     this.fx.push({ type: 'lamp', lamp: l });
@@ -75,6 +81,7 @@ const st = {
     toast('Осторожнее на тротуаре!');
   },
   onBusted() {
+    missions.onBusted();
     toast('ЗАДЕРЖАН! Розыск снят');
     audio.crash(120);
     clearHeat();
@@ -110,6 +117,7 @@ function osmSpot(x, y) {
 }
 
 function respawn() {
+  missions.onRespawn();
   const P = st.player;
   if (MOSCOW) {
     const sp = osmSpot(P.x, P.y);
@@ -200,6 +208,7 @@ document.getElementById('go-moscow').addEventListener('click', (e) => {
 });
 if (MOSCOW) document.body.classList.add('moscow');
 document.getElementById('fixbtn').addEventListener('click', (e) => { e.stopPropagation(); respawn(); });
+function introHidden() { return document.getElementById('intro').classList.contains('hidden'); }
 function hideIntro() { document.getElementById('intro').classList.add('hidden'); }
 
 function readInput() {
@@ -213,6 +222,57 @@ function readInput() {
 // ---------------------------------------------------------------- HUD
 let toastT = 0;
 function toast(msg) { hudToast.textContent = msg; hudToast.classList.add('show'); toastT = 2.2; }
+
+// ---------------------------------------------------------------- задания и события
+let bigT = 0;
+const bonusQ = [];
+const missions = createMissions(st, {
+  toast,
+  big(title, sub, kind) {
+    hudBig.innerHTML = '';
+    const h = document.createElement('b'); h.textContent = title;
+    const p = document.createElement('span'); p.textContent = sub || '';
+    hudBig.append(h, p);
+    hudBig.className = 'show ' + kind;
+    bigT = 3;
+  },
+  bonus(text) { bonusQ.push(text); if (bonusQ.length > 4) bonusQ.shift(); renderBonus(); },
+  sound(kind) { audio.chime(kind); },
+  storm() { toggleRain(); },
+});
+function renderBonus() {
+  hudBonus.innerHTML = '';
+  for (const t of bonusQ) { const d = document.createElement('div'); d.textContent = t; hudBonus.appendChild(d); }
+}
+let bonusT = 0;
+function updateMissionHud(dt) {
+  if (bigT > 0 && (bigT -= dt) <= 0) hudBig.classList.remove('show');
+  if (bonusQ.length && (bonusT += dt) > 1.6) { bonusT = 0; bonusQ.shift(); renderBonus(); }
+  hudMoney.textContent = missions.money.toLocaleString('ru-RU') + ' ₽' + (missions.mult > 1 ? ' ×2' : '');
+  const pn = missions.panel();
+  hudMission.classList.toggle('hidden', !pn);
+  if (!pn) return;
+  hudMission.style.setProperty('--mc', pn.col);
+  hudMission.classList.toggle('danger', !!pn.danger);
+  hudMission.querySelector('.t').textContent = pn.title;
+  hudMission.querySelector('.l').textContent = pn.line;
+  hudMission.querySelector('.tm').textContent = pn.time || '';
+  const ar = hudMission.querySelector('.ar');
+  ar.style.visibility = pn.target == null ? 'hidden' : 'visible';
+  if (pn.target != null) ar.style.transform = `rotate(${pn.target}rad)`;
+}
+function drawMarkers(m, P, scale, half) {
+  const R = half * 0.9;
+  for (const mk of st.markers || []) {
+    let dx = mk.x - P.x, dy = mk.y - P.y;
+    const d = Math.hypot(dx, dy);
+    const edge = d > R;
+    if (edge) { dx *= R / d; dy *= R / d; }
+    m.fillStyle = mk.col;
+    m.strokeStyle = '#000'; m.lineWidth = 2 * scale;
+    m.beginPath(); m.arc(P.x + dx, P.y + dy, (mk.kind === 'pickup' ? 4 : edge ? 5 : 7) * scale, 0, 6.29); m.fill(); m.stroke();
+  }
+}
 let lastDistrict = '';
 
 function drawMinimap() {
@@ -275,6 +335,7 @@ function drawMinimap() {
   // машины
   m.fillStyle = '#e8d070';
   for (const c of st.traffic) m.fillRect(c.x - 25, c.y - 25, 50, 50);
+  drawMarkers(m, P, scale, half);
   // игрок
   m.save(); m.translate(P.x, P.y); m.rotate(P.a);
   m.fillStyle = '#ff3b3b';
@@ -311,6 +372,7 @@ function drawMinimapOSM() {
   for (const c of st.traffic) m.fillRect(c.x - 25, c.y - 25, 50, 50);
   m.fillStyle = '#4a7aff';
   for (const c of police.cops) m.fillRect(c.x - 35, c.y - 35, 70, 70);
+  drawMarkers(m, P, scale, half);
   m.save(); m.translate(P.x, P.y); m.rotate(P.a);
   m.fillStyle = '#ff3b3b';
   m.beginPath(); m.moveTo(110, 0); m.lineTo(-70, -70); m.lineTo(-40, 0); m.lineTo(-70, 70); m.closePath(); m.fill();
@@ -352,7 +414,11 @@ function loop(now) {
     hudLoad.textContent = `Загружаем карту Москвы из OpenStreetMap — ${OSM.PLACES[atIdx][0]}${wait}`
       + (os.lastError ? ` · последняя ошибка: ${os.lastError}` : '');
     if (sp) { [P.x, P.y, P.a] = sp; st.cam.x = P.x; st.cam.y = P.y; osmWaiting = false; }
-  } else for (let k = 0; k < n; k++) step(dt / n);
+  } else {
+    for (let k = 0; k < n; k++) step(dt / n);
+    if (introHidden()) missions.update(dt);
+  }
+  st.markers = missions.markers();
   if (!MOSCOW) updateTrains(st);
   if (P.dead) { P.deadT += dt; if (P.deadT > 3.5) respawn(); }
   const speed = Math.hypot(P.vx, P.vy);
@@ -389,6 +455,7 @@ function loop(now) {
     hudDistrict.textContent = dname;
     hudDistrict.classList.remove('flash'); void hudDistrict.offsetWidth; hudDistrict.classList.add('flash');
   }
+  updateMissionHud(dt);
   if (toastT > 0) { toastT -= dt; if (toastT <= 0) hudToast.classList.remove('show'); }
   if (frame % 3 === 0) drawMinimap();
   audio.siren(sirenLevel(P));

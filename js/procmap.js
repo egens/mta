@@ -31,7 +31,7 @@ export const procMap = {
     for (let tries = 0; tries < 6; tries++) {
       const a = Math.random() * Math.PI * 2, d = dmin + Math.random() * (dmax - dmin);
       const i = W.colAt(x + Math.cos(a) * d), j = W.rowAt(y + Math.sin(a) * d);
-      const px = W.roadX(i) + 21, py = (W.roadY(j) + W.roadY(j + 1)) / 2;
+      const px = W.roadX(i) + 21, py = W.roadY(j) + (W.roadY(j + 1) - W.roadY(j)) * (0.25 + Math.random() * 0.5);
       if (!W.isWater(px, py)) return [px, py, Math.atan2(y - py, x - px)];
     }
     return null;
