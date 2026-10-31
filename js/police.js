@@ -20,6 +20,7 @@ const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 function copSt(st, cop) {
   return {
     skids: st.skids, fx: st.fx, trains: st.trains,
+    get works() { return st.works; },
     onImpact() {},
     onDamage() {},
     onWreck() { cop.wreck = true; st.fx.push({ type: 'sparks', x: cop.x, y: cop.y, n: 30 }); addHeat(0.6); },

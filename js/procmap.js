@@ -36,6 +36,36 @@ export const procMap = {
     }
     return null;
   },
+  // участок ремонта на крайней полосе проспекта, посередине квартала
+  worksSpot(x, y, dmin, dmax) {
+    for (let tries = 0; tries < 8; tries++) {
+      const vert = Math.random() < 0.5;
+      const a = Math.random() * Math.PI * 2, d = dmin + Math.random() * (dmax - dmin);
+      const px = x + Math.cos(a) * d, py = y + Math.sin(a) * d;
+      const i = W.colAt(px), j = W.rowAt(py);
+      if (vert ? !W.aveX(i) : !W.aveY(j)) continue;
+      const side = Math.random() < 0.5 ? 1 : -1;
+      const hw = 17, hl = 130;
+      let cx, cy, ux, uy;
+      if (vert) {
+        const y0 = W.roadY(j) + W.widthY(j) / 2, y1 = W.roadY(j + 1) - W.widthY(j + 1) / 2;
+        if (y1 - y0 < 2 * hl + 160) continue;
+        cx = W.roadX(i) + side * 54; cy = (y0 + y1) / 2; ux = 0; uy = 1;
+      } else {
+        const x0 = W.roadX(i) + W.widthX(i) / 2, x1 = W.roadX(i + 1) - W.widthX(i + 1) / 2;
+        if (x1 - x0 < 2 * hl + 160) continue;
+        cx = (x0 + x1) / 2; cy = W.roadY(j) + side * 54; ux = 1; uy = 0;
+      }
+      const bx0 = cx - ux * hl - 60, bx1 = cx + ux * hl + 60, by0 = cy - uy * hl - 60, by1 = cy + uy * hl + 60;
+      if (W.diagsInRect(bx0, by0, bx1, by1, 80).length) continue;
+      if (!vert && W.railsInRange(bx0, bx1).length) continue;
+      let bad = false;
+      for (let u = -hl; u <= hl; u += 40) if (W.riverDist(cx + ux * u, cy + uy * u) < 260) bad = true;
+      if (bad) continue;
+      return { x: cx, y: cy, ux, uy, ix: vert ? -side : 0, iy: vert ? 0 : -side, hl, hw };
+    }
+    return null;
+  },
   district: W.districtAt,
   ready: () => true,
 };

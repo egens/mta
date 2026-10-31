@@ -12,6 +12,7 @@ import { MAP, useMap } from './map.js';
 import { procMap } from './procmap.js';
 import * as OSM from './osm.js';
 import { updateTrafficOSM, updatePedsOSM } from './osmtraffic.js';
+import { updateWorks } from './roadworks.js';
 import { createMissions } from './missions.js';
 
 // режим карты: процедурный город или Москва (?map=moscow&at=N)
@@ -42,7 +43,7 @@ const audio = createAudio();
 let DPR = 1;
 const st = {
   cam: { x: 0, y: 0, z: 1 }, W: 0, H: 0, time: 0, dt: 0, viewR: 2000,
-  player: null, traffic: [], peds: [], trains: [], skids: [], fx: [], cops: police.cops,
+  player: null, traffic: [], peds: [], trains: [], skids: [], fx: [], works: [], cops: police.cops,
   shake: 0, dist: 0,
   onImpact(power, x, y, sparks) {
     if (power < 40) return;
@@ -71,6 +72,15 @@ const st = {
     this.fx.push({ type: 'pane', pane: p });
     audio.glass(1);
     if (byPlayer) { this.shake = Math.min(14, this.shake + 3); addHeat(0.25); }
+  },
+  onConeHit(c, sp) {
+    audio.thud(0.15);
+    if (sp > 200) this.shake = Math.min(14, this.shake + 1.5);
+  },
+  onBoardHit(b, sp) {
+    audio.lampHit();
+    this.shake = Math.min(14, this.shake + 3);
+    addHeat(0.15);
   },
   onCarHit(o, power) {
     if (power > 110) addHeat(o.police ? 1 : 0.3);
@@ -262,6 +272,13 @@ function updateMissionHud(dt) {
   if (pn.target != null) ar.style.transform = `rotate(${pn.target}rad)`;
 }
 function drawMarkers(m, P, scale, half) {
+  // ремонт дорог — оранжевые полосы
+  m.fillStyle = '#ff8a2a';
+  for (const z of st.works || []) {
+    m.save(); m.translate(z.x, z.y); m.rotate(z.a);
+    m.fillRect(-z.hl, -Math.max(z.hw, 2.5 * scale), z.hl * 2, Math.max(z.hw, 2.5 * scale) * 2);
+    m.restore();
+  }
   const R = half * 0.9;
   for (const mk of st.markers || []) {
     let dx = mk.x - P.x, dy = mk.y - P.y;
@@ -394,6 +411,7 @@ function step(dt) {
   st.cops = police.cops;
   if (MOSCOW) { updateTrafficOSM(st, dt); updatePedsOSM(st, dt); }
   else { updateTraffic(st, dt); updatePeds(st, dt); }
+  updateWorks(st, dt);
 }
 
 function loop(now) {

@@ -1,8 +1,9 @@
 // Городской трафик по сетке улиц, пешеходы на тротуарах и поезда.
 import * as W from './world.js';
-import { CAR_COLORS, CAR_DIM } from './sprites.js';
+import { CAR_COLORS, CAR_DIM, BUS_COLORS, WORK_COLORS } from './sprites.js';
 import { hashU } from './util.js';
 import { obbObb, collideStatic } from './car.js';
+import { worksSteer } from './roadworks.js';
 
 const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
 const MAX_CARS = 34;
@@ -80,10 +81,11 @@ function pickSprite(c) {
   const r = Math.random();
   c.heavy = false; c.police = false;
   const pick = (a) => a[(Math.random() * a.length) | 0];
-  if (r < 0.08) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.cruise *= 0.8; }
-  else if (r < 0.13) { c.kind = 'bus'; c.color = '#d0d4d8'; c.heavy = true; c.cruise *= 0.75; }
-  else if (r < 0.36) { c.kind = 'taxi'; c.color = '#e8b81c'; }
-  else if (r < 0.39) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
+  if (r < 0.06) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.cruise *= 0.8; }
+  else if (r < 0.15) { c.kind = 'bus'; c.color = pick(BUS_COLORS); c.heavy = true; c.cruise *= 0.75; c.stopIn = 6 + Math.random() * 14; }
+  else if (r < 0.2) { c.kind = pick(['dump', 'dump', 'mixer', 'roller']); c.color = pick(WORK_COLORS); c.heavy = true; c.cruise *= c.kind === 'roller' ? 0.5 : 0.72; }
+  else if (r < 0.38) { c.kind = 'taxi'; c.color = '#e8b81c'; }
+  else if (r < 0.41) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
   else { c.kind = pick(['sedan', 'sedan', 'sedan', 'hatch', 'van']); c.color = pick(CAR_COLORS); }
   [c.L, c.W] = CAR_DIM[c.kind];
 }
@@ -122,6 +124,15 @@ function placeOnSeg(c) {
   }
 }
 
+// автобус время от времени встаёт на остановку посреди квартала
+export function busStop(c, dt, canStop) {
+  if (c.kind !== 'bus') return false;
+  if (c.stopT > 0) { c.stopT -= dt; return true; }
+  c.stopIn -= dt;
+  if (c.stopIn <= 0 && canStop) { c.stopT = 3.5 + Math.random() * 3; c.stopIn = 18 + Math.random() * 20; return true; }
+  return false;
+}
+
 function mustStop(c, time) {
   const s = signalState(c.ni, c.nj, time);
   const dist = c.seg.len - c.seg.s;
@@ -148,8 +159,9 @@ export function updateTraffic(st, dt) {
       continue;
     }
     const fx = Math.cos(c.a), fy = Math.sin(c.a);
-    let target = c.cruise;
+    let target = Math.min(c.cruise, c.wcap || Infinity);
     const g = c.seg;
+    if (busStop(c, dt, g.kind === 's' && g.s > 120 && g.len - g.s > 200)) target = 0;
     if (g.kind === 's') {
       if (g.s > g.len - 160 && mustStop(c, time)) {
         const dist = Math.max(0, g.len - g.s - 2);
@@ -204,6 +216,8 @@ export function updateTraffic(st, dt) {
       }
     }
     placeOnSeg(c);
+    c.wcap = worksSteer(st, c, c.x, c.y, dt);
+    c.x += c.wx; c.y += c.wy;
   }
   // машины после аварии мешают друг другу
   for (let a = 0; a < st.traffic.length; a++) {

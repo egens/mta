@@ -23,13 +23,18 @@ export function repairPlayer(P) {
 
 // Повреждения по зонам: удар приходит со стороны, противоположной нормали выталкивания
 export function damagePlayer(P, impact, nx, ny, st) {
-  if (P.dead || impact < 70) return;
+  if (P.dead || impact < 110) return;
   const fx = Math.cos(P.a), fy = Math.sin(P.a);
   const lx = -(nx * fx + ny * fy), ly = -(-nx * fy + ny * fx);
   const zone = Math.abs(lx) > Math.abs(ly) ? (lx > 0 ? 'front' : 'rear') : (ly > 0 ? 'right' : 'left');
-  const amount = Math.min(45, (impact - 70) * 0.11);
+  // мягкая кривая: царапины почти бесплатны, лоб в стену на 200 км/ч — около четверти
+  let amount = Math.min(26, Math.pow((impact - 110) / 100, 1.3) * 5);
+  // серия касаний за доли секунды (скрежет о стену, отскок) считается одним ударом
+  const now = performance.now();
+  if (now - (P.hitAt || 0) < 350) amount *= 0.25;
+  P.hitAt = now;
   P.hp = Math.max(0, P.hp - amount);
-  P.dmg[zone] = Math.min(1, P.dmg[zone] + amount / 45);
+  P.dmg[zone] = Math.min(1, P.dmg[zone] + amount / 30);
   if (st && st.onDamage) st.onDamage(zone, amount, P);
   if (P.hp <= 0 && !P.dead) { P.dead = true; P.deadT = 0; if (st && st.onWreck) st.onWreck(P); }
 }
@@ -284,6 +289,15 @@ export function collideStatic(c, st, isPlayer) {
           c.vx *= 0.92; c.vy *= 0.92;
           st.onPaneBreak(p, c, isPlayer);
         } else respond(c, h, 0.2);
+      }
+    }
+    // техника на ремонте дороги — тяжёлая и неподвижная
+    if (st && st.works) for (const z of st.works) {
+      if (Math.abs(z.x - c.x) > z.hl + 100 || Math.abs(z.y - c.y) > z.hl + 100) continue;
+      for (const m of z.solid) {
+        if (!zHit(c, 0, m.h)) continue;
+        const h = obbObb(c, m);
+        if (h) { const im = respond(c, h, 0.3); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; inx = h.nx; iny = h.ny; } }
       }
     }
     if (st && st.trains) for (const t of st.trains) {

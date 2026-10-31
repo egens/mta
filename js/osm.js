@@ -785,6 +785,31 @@ export const osmMap = {
     const m = graph.get(nid);
     return [n.x, n.y, Math.atan2(m.y - n.y, m.x - n.x)];
   },
+  // участок ремонта у края широкой улицы, на прямом отрезке без перекрёстков
+  worksSpot(x, y, dmin, dmax) {
+    const roads = [...roadsIn(x - dmax, y - dmax, x + dmax, y + dmax)].filter((r) => r.kind === 'car' && !r.bridge && r.w >= 90 && r.rank <= 6);
+    for (let tries = 0; tries < 8 && roads.length; tries++) {
+      const r = roads[(Math.random() * roads.length) | 0], p = r.pts;
+      const k = 2 * (1 + ((Math.random() * (p.length / 2 - 1)) | 0));
+      const ax = p[k - 2], ay = p[k - 1], bx = p[k], by = p[k + 1];
+      const len = Math.hypot(bx - ax, by - ay);
+      if (len < 360) continue;
+      const mx = (ax + bx) / 2, my = (ay + by) / 2, d = Math.hypot(mx - x, my - y);
+      if (d < dmin || d > dmax) continue;
+      const hl = Math.min(140, len / 2 - 60), hw = 18;
+      let bad = false;
+      for (const n of nodesIn(mx - hl - 80, my - hl - 80, mx + hl + 80, my + hl + 80)) {
+        if (Math.hypot(n.x - mx, n.y - my) < hl + 70 && (n.adj.size >= 3 || (n.nav && n.nav.size >= 3) || n.signal)) bad = true;
+      }
+      if (bad) continue;
+      const ux = (bx - ax) / len, uy = (by - ay) / len, side = Math.random() < 0.5 ? 1 : -1;
+      const nx = -uy * side, ny = ux * side, off = r.w / 2 - hw - 4;
+      const cx = mx + nx * off, cy = my + ny * off;
+      if (isWater(cx, cy)) continue;
+      return { x: cx, y: cy, ux, uy, ix: -nx, iy: -ny, hl, hw };
+    }
+    return null;
+  },
   district,
   ready: tileReady,
 };

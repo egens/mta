@@ -1,9 +1,11 @@
 // Трафик и пешеходы на карте Москвы: машины ездят по графу улиц OSM
 // (с односторонним движением и светофорами), пешеходы — по тротуарам и дорожкам.
 import * as OSM from './osm.js';
-import { CAR_COLORS, CAR_DIM } from './sprites.js';
+import { CAR_COLORS, CAR_DIM, BUS_COLORS, WORK_COLORS } from './sprites.js';
 import { hashU } from './util.js';
 import { obbObb, collideStatic } from './car.js';
+import { busStop } from './traffic.js';
+import { worksSteer } from './roadworks.js';
 
 const MAX_CARS = 30, MAX_PEDS = 40;
 const CRUISE = { motorway: 330, trunk: 300, primary: 260, secondary: 230, tertiary: 200, residential: 150, unclassified: 150, living_street: 90, service: 90 };
@@ -44,10 +46,11 @@ function pickNext(c) {
 function pickKind(c) {
   const r = Math.random();
   const pick = (a) => a[(Math.random() * a.length) | 0];
-  if (r < 0.06) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.var *= 0.8; }
-  else if (r < 0.1) { c.kind = 'bus'; c.color = '#d0d4d8'; c.heavy = true; c.var *= 0.75; }
-  else if (r < 0.3) { c.kind = 'taxi'; c.color = '#e8b81c'; }
-  else if (r < 0.33) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
+  if (r < 0.05) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.var *= 0.8; }
+  else if (r < 0.14) { c.kind = 'bus'; c.color = pick(BUS_COLORS); c.heavy = true; c.var *= 0.75; c.stopIn = 6 + Math.random() * 14; }
+  else if (r < 0.19) { c.kind = pick(['dump', 'dump', 'mixer', 'roller']); c.color = pick(WORK_COLORS); c.heavy = true; c.var *= c.kind === 'roller' ? 0.5 : 0.72; }
+  else if (r < 0.36) { c.kind = 'taxi'; c.color = '#e8b81c'; }
+  else if (r < 0.39) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
   else { c.kind = pick(['sedan', 'sedan', 'sedan', 'hatch', 'van']); c.color = pick(CAR_COLORS); }
   [c.L, c.W] = CAR_DIM[c.kind];
 }
@@ -74,9 +77,14 @@ function spawnCar(st) {
   st.traffic.push(c);
 }
 
+function basePos(c) {
+  const dx = (c.to.x - c.from.x) / c.len, dy = (c.to.y - c.from.y) / c.len;
+  return [c.from.x + dx * c.s - dy * c.off, c.from.y + dy * c.s + dx * c.off];
+}
 function place(c, k) {
   const dx = (c.to.x - c.from.x) / c.len, dy = (c.to.y - c.from.y) / c.len;
-  const tx = c.from.x + dx * c.s - dy * c.off, ty = c.from.y + dy * c.s + dx * c.off;
+  const [bx, by] = basePos(c);
+  const tx = bx + (c.wx || 0), ty = by + (c.wy || 0);
   c.x += (tx - c.x) * k; c.y += (ty - c.y) * k;
   const a = Math.atan2(dy, dx);
   c.a = k >= 1 ? a : c.a + wrap(a - c.a) * Math.min(1, k * 1.5);
@@ -97,9 +105,10 @@ export function updateTrafficOSM(st, dt) {
       continue;
     }
     const fx = Math.cos(c.a), fy = Math.sin(c.a);
-    let target = c.cruise;
+    let target = Math.min(c.cruise, c.wcap || Infinity);
     // светофор и поворот впереди
     const rem = c.len - c.s;
+    if (busStop(c, dt, c.s > 100 && rem > 200)) target = 0;
     if (c.to.signal && rem < 160) {
       const ax = Math.abs(c.to.x - c.from.x) > Math.abs(c.to.y - c.from.y) ? 'h' : 'v';
       if (!signalGreen(c.to.id, ax, st.time)) target = Math.min(target, Math.sqrt(2 * 380 * Math.max(0, rem - 70)));
@@ -132,7 +141,7 @@ export function updateTrafficOSM(st, dt) {
       setSeg(c, c.to, nxt);
       c.s = extra;
     }
-    if (c.to) place(c, Math.min(1, dt * 10));
+    if (c.to) { const [bx, by] = basePos(c); c.wcap = worksSteer(st, c, bx, by, dt); place(c, Math.min(1, dt * 10)); }
   }
   // столкновения машин после аварии
   for (const c of st.traffic) {
