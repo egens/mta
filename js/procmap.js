@@ -5,8 +5,10 @@ import { CS, peekChunk } from './chunks.js';
 export const procMap = {
   surfaceAt: W.surfaceAt,
   isWater: W.isWater,
+  isPond: W.isPond,
   collidersNear(x0, y0, x1, y1, out) {
-    for (let i = W.colAt(x0); i <= W.colAt(x1); i++) for (let j = W.rowAt(y0); j <= W.rowAt(y1); j++) out.push(W.getBlock(i, j));
+    // с запасом на ширину улицы: квартал может занимать полосу пропавшего отрезка соседней улицы
+    for (let i = W.colAt(x0 - 80); i <= W.colAt(x1 + 80); i++) for (let j = W.rowAt(y0 - 80); j <= W.rowAt(y1 + 80); j++) out.push(W.getBlock(i, j));
     return out;
   },
   lampsNear(x0, y0, x1, y1, cb) {
@@ -24,13 +26,21 @@ export const procMap = {
       return i + ',' + j;
     },
     pos(k) { const [i, j] = k.split(',').map(Number); return [W.roadX(i), W.roadY(j)]; },
-    neighbors(k) { const [i, j] = k.split(',').map(Number); return [(i + 1) + ',' + j, (i - 1) + ',' + j, i + ',' + (j + 1), i + ',' + (j - 1)]; },
+    neighbors(k) {
+      const [i, j] = k.split(',').map(Number), out = [];
+      if (W.hSegExists(i, j)) out.push((i + 1) + ',' + j);
+      if (W.hSegExists(i - 1, j)) out.push((i - 1) + ',' + j);
+      if (W.vSegExists(i, j)) out.push(i + ',' + (j + 1));
+      if (W.vSegExists(i, j - 1)) out.push(i + ',' + (j - 1));
+      return out;
+    },
   },
   // точка на дороге на заданном расстоянии от (x, y): [x, y, угол]
   roadSpawn(x, y, dmin, dmax) {
     for (let tries = 0; tries < 6; tries++) {
       const a = Math.random() * Math.PI * 2, d = dmin + Math.random() * (dmax - dmin);
       const i = W.colAt(x + Math.cos(a) * d), j = W.rowAt(y + Math.sin(a) * d);
+      if (!W.vSegExists(i, j)) continue;
       const px = W.roadX(i) + 21, py = W.roadY(j) + (W.roadY(j + 1) - W.roadY(j)) * (0.25 + Math.random() * 0.5);
       if (!W.isWater(px, py)) return [px, py, Math.atan2(y - py, x - px)];
     }
@@ -43,7 +53,7 @@ export const procMap = {
       const a = Math.random() * Math.PI * 2, d = dmin + Math.random() * (dmax - dmin);
       const px = x + Math.cos(a) * d, py = y + Math.sin(a) * d;
       const i = W.colAt(px), j = W.rowAt(py);
-      if (vert ? !W.aveX(i) : !W.aveY(j)) continue;
+      if (vert ? !W.aveX(i) || !W.vSegExists(i, j) : !W.aveY(j) || !W.hSegExists(i, j)) continue;
       const side = Math.random() < 0.5 ? 1 : -1;
       const hw = 17, hl = 130;
       let cx, cy, ux, uy;

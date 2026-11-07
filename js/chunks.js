@@ -60,6 +60,8 @@ function buildChunk(cx, cy) {
   const rails = W.railsInRange(x0, x1);
   for (const i of rails) { g.fillStyle = PAL.gravel; g.fillRect(W.railX(i) - RAIL_W / 2, y0 - 2, RAIL_W, CS + 4); }
   drawGridAsphalt(g, R, i0, i1, j0, j1);
+  // кварталы на месте пропавших отрезков улиц перекрывают асфальт
+  for (const B of blocks) if (B.ext) drawBlockGround(g, B);
   // разметка сетки не заходит на диагональные проспекты
   g.save();
   for (const d of diags) clipOutside(g, R, diagBand(d, R, DIAG_W / 2 + SW));
@@ -183,6 +185,7 @@ function drawGridMarks(g, R, i0, i1, j0, j1) {
 }
 
 function segMarks(g, R, vert, i, j) {
+  if (vert ? !W.vSegExists(i, j) : !W.hSegExists(i, j)) return;
   const c = vert ? W.roadX(i) : W.roadY(j);
   const w = vert ? W.widthX(i) : W.widthY(j);
   const ave = vert ? W.aveX(i) : W.aveY(j);
@@ -235,8 +238,10 @@ function drawRivers(g, R) {
       g.closePath();
     };
     poly(10, 10); g.fillStyle = PAL.bank; g.fill();
-    poly(0, 0); g.fillStyle = PAL.water; g.fill();
-    poly(0, 0, 0.55); g.fillStyle = '#0b2438'; g.fill();
+    // русло вырезается из земли: вода и стенки набережной — отдельной геометрией ниже уровня улиц
+    g.save(); g.globalCompositeOperation = 'destination-out';
+    poly(0, 0); g.fill();
+    g.restore();
     // парапет набережной
     g.strokeStyle = '#a19c92'; g.lineWidth = 2;
     for (const side of [-1, 1]) {
@@ -246,14 +251,6 @@ function drawRivers(g, R) {
         n ? g.lineTo(xs[n], y) : g.moveTo(xs[n], y);
       }
       g.stroke();
-    }
-    // рябь
-    g.fillStyle = 'rgba(160,200,230,0.07)';
-    for (let n = 0; n < xs.length; n += 1) {
-      const h = hash(xs[n] | 0, m, 9);
-      if (h < 0.5) continue;
-      const y = tops[n] + (bots[n] - tops[n]) * hash(xs[n] | 0, m, 10);
-      g.fillRect(xs[n], y, 10 + h * 12, 1.5);
     }
   }
 }
@@ -269,6 +266,7 @@ function drawBridges(g, R, i0, i1, j0, j1, lamps, inChunk) {
       const [lo, hi] = W.riverSpan(m, x - dw / 2, x + dw / 2);
       const a = lo - 24, b = hi + 24;
       if (b < R.y0 - 40 || a > R.y1 + 40) continue;
+      if (!W.vSegExists(i, W.rowAt((a + b) / 2))) continue;
       bridgeDeck(g, true, x, w, W.aveX(i), a, b, lamps, inChunk);
     }
   }
@@ -283,7 +281,7 @@ function drawBridges(g, R, i0, i1, j0, j1, lamps, inChunk) {
       const wet = W.riverDist(x, y - dw / 2) < 14 || W.riverDist(x, y) < 14 || W.riverDist(x, y + dw / 2) < 14;
       if (wet && s0 === null) s0 = x;
       if ((!wet || x + 8 > R.x1 + 300) && s0 !== null) {
-        bridgeDeck(g, false, y, w, W.aveY(j), s0 - 24, x + 24, lamps, inChunk);
+        if (W.hSegExists(W.colAt((s0 + x) / 2), j)) bridgeDeck(g, false, y, w, W.aveY(j), s0 - 24, x + 24, lamps, inChunk);
         s0 = null;
       }
     }
@@ -309,7 +307,7 @@ function bridgeDeck(g, vert, c, w, ave, a, b, lamps, inChunk) {
     const l = vert
       ? { x: c + s * (dw / 2 - 6), y: v, lx: c + s * (w / 2 - 12), ly: v }
       : { x: v, y: c + s * (dw / 2 - 6), lx: v, ly: c + s * (w / 2 - 12) };
-    Object.assign(l, { r: 140, c: 'white', i: 0.85, pole: true, broken: false });
+    Object.assign(l, { r: 140, c: 'cyan', i: 0.85, pole: false, broken: false });
     if (inChunk(l.x, l.y)) lamps.push(l);
   }
 }
@@ -404,7 +402,7 @@ function drawDiag(g, d, R, pass, lamps, inChunk, i0, i1, j0, j1, diags) {
     const [px, py] = P(t, s * (DIAG_W / 2 + 8));
     if (nearGridRoad(px, py) < 10) continue;
     const [lx, ly] = P(t, s * (DIAG_W / 2 - 16));
-    if (inChunk(px, py)) lamps.push({ x: px, y: py, lx, ly, r: 140, c: 'white', i: 0.85, pole: true, broken: false });
+    if (inChunk(px, py)) lamps.push({ x: px, y: py, lx, ly, r: 140, c: 'pink', i: 0.85, pole: false, broken: false });
   }
 }
 
@@ -421,7 +419,7 @@ function drawRailTracks(g, x, R, j0, j1) {
   // переезды
   for (let j = j0; j <= j1 + 1; j++) {
     const y = W.roadY(j), w = W.widthY(j);
-    if (y + w / 2 < R.y0 || y - w / 2 > R.y1) continue;
+    if (y + w / 2 < R.y0 || y - w / 2 > R.y1 || !W.hSegExists(W.colAt(x), j)) continue;
     g.fillStyle = '#48494d'; g.fillRect(x - RAIL_W / 2, y - w / 2, RAIL_W, w);
     g.fillStyle = '#c8c8c0';
     for (const s of [-1, 1]) for (let u = -w / 2; u < w / 2; u += 12) g.fillRect(x + s * (RAIL_W / 2 + 4) - 2, y + u, 4, 6);

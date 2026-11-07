@@ -148,17 +148,20 @@ export function railsInRange(x0, x1) {
 export function onBridge(x, y) {
   // каждая улица, пересекающая реку, идёт по мосту
   const i = colAt(x), j = rowAt(y);
-  for (const ii of [i, i + 1]) if (Math.abs(x - roadX(ii)) < widthX(ii) / 2 + 12) return true;
-  for (const jj of [j, j + 1]) if (Math.abs(y - roadY(jj)) < widthY(jj) / 2 + 12) return true;
+  for (const ii of [i, i + 1]) if (Math.abs(x - roadX(ii)) < widthX(ii) / 2 + 12 && vSegExists(ii, j)) return true;
+  for (const jj of [j, j + 1]) if (Math.abs(y - roadY(jj)) < widthY(jj) / 2 + 12 && hSegExists(i, jj)) return true;
   for (const d of diagsInRect(x, y, x, y, DIAG_W)) {
     if (Math.abs(diagSigned(d, x, y)) < DIAG_W / 2 + SW) return true;
   }
   if (hasRail(i) && Math.abs(x - railX(i)) < RAIL_W / 2 + 6) return true;
   return false;
 }
-export function isWater(x, y) {
-  if (riverDist(x, y) < 0 && !onBridge(x, y)) return true;
-  const b = getBlock(colAt(x), rowAt(y));
+// река лежит ниже уровня земли, между набережными
+export const RIVER_D = 36;
+export const isRiver = (x, y) => riverDist(x, y) < 0 && !onBridge(x, y);
+export function isWater(x, y) { return isRiver(x, y) || isPond(x, y); }
+export function isPond(x, y) {
+  const b = blockAt(x, y);
   for (const p of b.ponds) {
     const dx = (x - p.x) / p.rx, dy = (y - p.y) / p.ry;
     if (dx * dx + dy * dy < 0.82) return true;
@@ -167,9 +170,24 @@ export function isWater(x, y) {
 }
 
 // ---------------------------------------------------------------- граф для трафика
-// Все улицы непрерывны: реки пересекаются по мостам.
-export const hSegExists = () => true;
-export const vSegExists = () => true;
+// Улицы не бесконечны: отдельные отрезки между перекрёстками выпадают, и улица
+// упирается в поперечную Т-образным перекрёстком. У каждого узла пропадает не больше
+// одного отрезка — тупиков и Г-образных поворотов нет, сеть остаётся связной.
+// hSeg(i, j) — улица-строка j между колонками i и i+1; vSeg(i, j) — улица-колонка i между строками j и j+1.
+const hRoll = (i, j) => hash(i, j, 61), vRoll = (i, j) => hash(i, j, 62);
+const hCand = (i, j) => hRoll(i, j) < (aveY(j) ? 0.15 : 0.26);
+const vCand = (i, j) => vRoll(i, j) < (aveX(i) ? 0.15 : 0.26);
+// какой из отрезков-кандидатов «выигрывает» узел (наименьший бросок)
+function nodePick(i, j) {
+  let best = null, bv = 2;
+  if (hCand(i - 1, j) && hRoll(i - 1, j) < bv) { bv = hRoll(i - 1, j); best = 'h' + (i - 1); }
+  if (hCand(i, j) && hRoll(i, j) < bv) { bv = hRoll(i, j); best = 'h' + i; }
+  if (vCand(i, j - 1) && vRoll(i, j - 1) < bv) { bv = vRoll(i, j - 1); best = 'v' + (j - 1); }
+  if (vCand(i, j) && vRoll(i, j) < bv) { bv = vRoll(i, j); best = 'v' + j; }
+  return best;
+}
+export const hSegExists = (i, j) => !(hCand(i, j) && nodePick(i, j) === 'h' + i && nodePick(i + 1, j) === 'h' + i);
+export const vSegExists = (i, j) => !(vCand(i, j) && nodePick(i, j) === 'v' + j && nodePick(i, j + 1) === 'v' + j);
 
 // ---------------------------------------------------------------- зоны и районы
 export function zoneAt(x, y) {
@@ -204,7 +222,13 @@ export function getBlock(i, j) {
   }
   return b;
 }
-export const blockAt = (x, y) => getBlock(colAt(x), rowAt(y));
+export function blockAt(x, y) {
+  let i = colAt(x), j = rowAt(y);
+  // полоса пропавшей улицы принадлежит кварталу справа / снизу
+  if (x > roadX(i + 1) - widthX(i + 1) / 2 && !vSegExists(i + 1, j)) i++;
+  else if (y > roadY(j + 1) - widthY(j + 1) / 2 && !hSegExists(i, j + 1)) j++;
+  return getBlock(i, j);
+}
 
 const ROOFS = ['#1c1e23', '#212328', '#18191d', '#23221f', '#1c2028', '#151619', '#26272b', '#1f1d1b'];
 const WALLS = ['#0d0f13', '#121316', '#0e1118', '#141216', '#101315'];
@@ -213,8 +237,9 @@ const CONT = ['#7a2e2a', '#2e4f7a', '#2f6a3a', '#8a6a2a', '#5a5a5e', '#7a4a1e', 
 const NEON = ['pink', 'cyan', 'green', 'purple', 'yellow', 'blue'];
 
 function genBlock(i, j) {
-  const bx0 = roadX(i) + widthX(i) / 2, bx1 = roadX(i + 1) - widthX(i + 1) / 2;
-  const by0 = roadY(j) + widthY(j) / 2, by1 = roadY(j + 1) - widthY(j + 1) / 2;
+  // на месте пропавшего отрезка улицы (слева или сверху) квартал продолжается
+  const bx0 = roadX(i) + (vSegExists(i, j) ? 1 : -1) * widthX(i) / 2, bx1 = roadX(i + 1) - widthX(i + 1) / 2;
+  const by0 = roadY(j) + (hSegExists(i, j) ? 1 : -1) * widthY(j) / 2, by1 = roadY(j + 1) - widthY(j + 1) / 2;
   const r = rng(hashU(i, j, 999));
   const B = {
     i, j, x0: bx0, y0: by0, x1: bx1, y1: by1,
@@ -223,6 +248,7 @@ function genBlock(i, j) {
     lotColor: PAL.court, ground: [], buildings: [], trees: [], lamps: [], parked: [],
     props: [], boxes: [], circles: [], ponds: [], panes: [], ramps: [], garages: [], type: '',
   };
+  B.ext = bx0 < roadX(i) || by0 < roadY(j); // занял место пропавшей улицы
   B.diags = diagsInRect(bx0, by0, bx1, by1, DIAG_W / 2 + SW + 10);
   B.rail = hasRail(i) ? railX(i) : null;
   B.river = false;
@@ -248,7 +274,7 @@ function genBlock(i, j) {
     else if (z.dens > 0.55) type = 'perimeter';
     else if (z.dens > 0.47) type = 'micro';
     else if (z.dens > 0.41) type = 'mixed';
-    else type = 'houses';
+    else type = r() < 0.5 ? 'mixed' : 'perimeter'; // частного сектора в гигаполисе нет
   }
   if (cut && (type === 'perimeter' || type === 'micro' || type === 'stadium' || type === 'construction')) type = 'mixed';
   B.type = type;
@@ -309,6 +335,7 @@ function addBuilding(B, r, x, y, w, h, height, style, o = {}) {
   if (w < 8 || h < 8) return null;
   if (!rectClear(B, x, y, w, h, o.margin ?? 4)) return null;
   if (o.noOverlap && hitsSolid(B, x, y, w, h, 2)) return null;
+  if (GIGA[style]) height *= GIGA[style](r, B.dens || 0.5);
   const b = {
     x, y, w, h, cx: x + w / 2, cy: y + h / 2, height, style, seed: (r() * 2147483647) | 0,
     roof: o.roof || r.pick(ROOFS), wall: o.wall || r.pick(WALLS),
@@ -337,6 +364,14 @@ function addBuilding(B, r, x, y, w, h, height, style, o = {}) {
   return b;
 }
 const LOBBY_H = 30;
+// гигаполис: жилые и деловые дома вытянуты в небоскрёбы, тем выше, чем плотнее район
+const GIGA = {
+  tower: (r, d) => r.range(2.4, 4.2) * (0.8 + d),
+  office: (r) => r.range(1.8, 3.2),
+  resid: (r, d) => r.range(2.2, 3.6) * (0.7 + d * 0.6),
+  panel: (r) => r.range(2, 3.2),
+  shop: (r) => (r() < 0.4 ? r.range(3, 6) : r.range(1.2, 2)),
+};
 const LOBBY_STYLES = new Set(['office', 'shop', 'tower', 'resid']);
 
 function addTree(B, x, y, rad, kind) {
@@ -528,7 +563,7 @@ function shopLights(B, r, x, y, w, h, tol = 2, p = 0.5) {
     }
   }
 }
-const LED = ['white', 'white', 'white', 'purple', 'purple', 'pink', 'cyan', 'warm'];
+const LED = ['cyan', 'cyan', 'pink', 'pink', 'purple', 'purple', 'blue', 'white'];
 
 // ---------------------------------------------------------------- планировки
 const LAYOUT = {
@@ -1034,7 +1069,7 @@ export function rampHeight(rp, x, y) {
 }
 export function surfaceAt(x, y, z) {
   const B = blockAt(x, y);
-  let s = 0;
+  let s = isRiver(x, y) ? -RIVER_D : 0;
   for (const b of B.boxes) {
     if (!b.top || x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) continue;
     if (z >= b.z1 - 14 && b.z1 > s) s = b.z1;
@@ -1186,14 +1221,15 @@ function railFences(B) {
 function streetLamps(B, r) {
   const { i, j } = B;
   const sides = [
-    [B.x0, B.y0 + 5, B.x1, B.y0 + 5, 0, -1, aveY(j), 60, j * 2],
-    [B.x0, B.y1 - 5, B.x1, B.y1 - 5, 0, 1, aveY(j + 1), 122, j * 2 + 2],
-    [B.x0 + 5, B.y0, B.x0 + 5, B.y1, -1, 0, aveX(i), 60, i * 2 + 1],
-    [B.x1 - 5, B.y0, B.x1 - 5, B.y1, 1, 0, aveX(i + 1), 122, i * 2 + 3],
-  ];
+    hSegExists(i, j) && [B.x0, B.y0 + 5, B.x1, B.y0 + 5, 0, -1, aveY(j), 60, j * 2],
+    hSegExists(i, j + 1) && [B.x0, B.y1 - 5, B.x1, B.y1 - 5, 0, 1, aveY(j + 1), 122, j * 2 + 2],
+    vSegExists(i, j) && [B.x0 + 5, B.y0, B.x0 + 5, B.y1, -1, 0, aveX(i), 60, i * 2 + 1],
+    vSegExists(i + 1, j) && [B.x1 - 5, B.y0, B.x1 - 5, B.y1, 1, 0, aveX(i + 1), 122, i * 2 + 3],
+  ].filter(Boolean);
   const sp = 150;
   for (const [ax, ay, bx, by, nx, ny, ave, off, road] of sides) {
-    const sodium = !ave && hash(road, 0, 808) < 0.3;
+    // у каждой улицы свой неоновый оттенок фонарей
+    const lc = ['cyan', 'pink', 'purple', 'cyan', 'white', 'sodium'][(hash(road, 0, 808) * 6) | 0];
     const len = Math.hypot(bx - ax, by - ay);
     const dx = (bx - ax) / len, dy = (by - ay) / len;
     const bad = (x, y) => {
@@ -1204,7 +1240,7 @@ function streetLamps(B, r) {
     };
     for (let t = off; t < len - 40; t += sp) {
       const x = ax + dx * t, y = ay + dy * t;
-      if (!bad(x, y)) addLamp(B, x, y, x + nx * 20, y + ny * 20, ave ? 140 : 125, sodium ? 'sodium' : 'white', 0.85);
+      if (!bad(x, y)) addLamp(B, x, y, x + nx * 20, y + ny * 20, ave ? 140 : 125, lc, 0.85, false); // без столбов: свет падает от вывесок
     }
   }
 }

@@ -106,6 +106,7 @@ export function createMissions(st, ui) {
       const sum = pay(m.reward * M.mult);
       ui.big('ЗАДАНИЕ ВЫПОЛНЕНО', `${msg ? msg + ' · ' : ''}+${sum} ₽`, 'win');
       ui.sound('win');
+      if (ui.done) ui.done(m.type);
     } else {
       ui.big('ПРОВАЛ', msg, 'fail');
       ui.sound('fail');
@@ -265,6 +266,13 @@ export function createMissions(st, ui) {
   // ---------------------------------------------------------------- наружу
   return {
     get money() { return M.money; },
+    give(sum, why) { return pay(sum, why); },
+    spend(sum) {
+      if (sum > M.money) return false;
+      M.money -= sum;
+      save({ money: M.money, done: M.done });
+      return true;
+    },
     get mult() { return M.mult; },
     update(dt) {
       if (M.multT > 0 && (M.multT -= dt) <= 0) { M.mult = 1; ui.bonus('Двойные деньги закончились'); }
