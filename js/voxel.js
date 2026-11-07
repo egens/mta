@@ -8,15 +8,14 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import * as W from './world.js';
 import { CS, buildChunkAt, peekChunk, releaseCanvas } from './chunks.js';
 import { signalState } from './traffic.js';
-import { MAP } from './map.js';
-import * as OSM from './osm.js';
 import { S, LIGHT_RGB, CAR_COLORS, CAR_DIM } from './sprites.js';
 import { rain } from './rain.js';
 import { hashU } from './util.js';
 
-const BG = 0x04060c;
-const CHUNK_R = 2600;     // радиус подгрузки земли
-const BLOCK_R = 2300;     // радиус подгрузки кварталов
+const FOG = 0x2a0d3c;     // кислотная дымка у земли
+const CHUNK_R = 2400;     // радиус подгрузки земли
+const BLOCK_R = 2400;     // радиус подгрузки кварталов
+const FOG_FAR = 2600;     // дальше — только силуэты мегабашен на горизонте
 const TEX = 256;          // разрешение запечённой текстуры чанка (2 ед. на тексель — «пиксельная» земля)
 
 // ---------------------------------------------------------------- геометрия из коробок
@@ -89,13 +88,56 @@ function windowAtlas() {
   for (let y = 1; y < 64; y += 2) {
     const floorDark = rnd() < 0.25;
     for (let x = 1; x < 64; x += 2) {
-      if (floorDark || rnd() > 0.4) { g.fillStyle = '#07090c'; g.fillRect(x, y, 1, 1); continue; }
+      if (floorDark || rnd() > 0.32) { g.fillStyle = '#07090c'; g.fillRect(x, y, 1, 1); continue; }
       const k = rnd();
-      g.fillStyle = k < 0.68 ? '#ffc778' : k < 0.92 ? '#b8d6ff' : '#6a88ff';
+      g.fillStyle = k < 0.36 ? '#ffd2a0' : k < 0.62 ? '#8ee8ff' : k < 0.8 ? '#ff6ad2' : k < 0.92 ? '#b48aff' : '#f4f4ff';
       g.fillRect(x, y, 1, 1);
     }
   }
   return pixelTex(c);
+}
+// Атлас для дальних мегабашен: тёмные стены (не чёрные — их тонирует дымка) и редкие окна
+function skylineAtlas() {
+  const c = canvas(64, 64), g = c.getContext('2d');
+  g.fillStyle = '#1c1a24'; g.fillRect(0, 0, 64, 64);
+  let s = 777;
+  const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  for (let y = 1; y < 64; y += 2) for (let x = 1; x < 64; x += 2) {
+    if (rnd() > 0.3) continue;
+    const k = rnd();
+    g.fillStyle = k < 0.4 ? '#ffc890' : k < 0.7 ? '#70e0ff' : k < 0.88 ? '#ff5ad0' : '#ffffff';
+    g.fillRect(x, y, 1, 1);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.magFilter = THREE.NearestFilter;
+  return t;
+}
+// Рекламные голограммы: 2×4 вывески на одном атласе
+const ADS = [
+  ['РАМЕН 24/7', '#ff3fa0'], ['ИМПЛАНТЫ', '#3ef2ff'], ['НЕО·БАНК', '#ffd23a'], ['КИБЕРДОК', '#7aff6a'],
+  ['ГОЛО·ТВ', '#b46aff'], ['СИНТ·ЕДА', '#ff7a2a'], ['ОТЕЛЬ', '#ff3f5a'], ['РОБОТАКСИ', '#3a9aff'],
+];
+function adAtlas() {
+  const c = canvas(512, 512), g = c.getContext('2d');
+  ADS.forEach(([text, color], k) => {
+    const x = (k % 2) * 256, y = ((k / 2) | 0) * 128;
+    g.save();
+    g.beginPath(); g.rect(x + 6, y + 6, 244, 116); g.clip();
+    g.fillStyle = 'rgba(10,4,24,0.85)'; g.fillRect(x, y, 256, 128);
+    g.strokeStyle = color; g.lineWidth = 4; g.shadowColor = color; g.shadowBlur = 14;
+    g.strokeRect(x + 10, y + 10, 236, 108);
+    for (let l = y + 14; l < y + 120; l += 4) { g.fillStyle = 'rgba(255,255,255,0.04)'; g.fillRect(x, l, 256, 1); }
+    g.fillStyle = '#ffffff'; g.font = 'bold 34px "Trebuchet MS", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.shadowBlur = 18; g.fillText(text, x + 128, y + 58);
+    g.fillStyle = color; g.font = 'bold 14px monospace'; g.shadowBlur = 6;
+    g.fillText('— 2087 —', x + 128, y + 96);
+    g.restore();
+  });
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
 }
 function mullionTex() {
   const c = canvas(16, 16), g = c.getContext('2d');
@@ -136,7 +178,7 @@ let coneTex = null;
 function carModel(kind, color, isPlayer = false) {
   const [L, Wd] = CAR_DIM[kind] || CAR_DIM.sedan;
   const g = new THREE.Group();
-  const body = isPlayer ? new THREE.MeshLambertMaterial({ color }) : lambert(color);
+  const body = isPlayer ? new THREE.MeshPhongMaterial({ color, specular: 0x8a8f98, shininess: 70 }) : lambert(color);
   const dark = lambert('#14181e');
   const tall = kind === 'bus' || kind === 'truck' || kind === 'dump' || kind === 'mixer';
   const P = {};
@@ -186,6 +228,28 @@ function carModel(kind, color, isPlayer = false) {
     for (const sd of [-1, 1]) part(g, dark, -L * 0.15, 26, sd * (Wd / 2 - 2), 1.5, 12, 1.5);
     part(g, body, -L * 0.15, 32, 0, L * 0.4, 1.5, Wd - 2);
     g.userData.beacon = [part(g, glowMat('orange', 3), -L * 0.15, 34, 0, 4, 3, 4)];
+  } else if (kind === 'delorean') {
+    // клиновидное купе из нержавейки: низкий острый нос, плоская крыша с «крыльями чайки»,
+    // жалюзи на заднем стекле, чёрный молдинг по бокам и неоновая подсветка днища
+    const seg = L / 3, steel = body;
+    const blk = lambert('#101114'), glass = lambert('#0b0f16');
+    P.mid = part(g, steel, 0, 8, 0, seg + 0.2, 7, Wd);
+    P.front = part(g, steel, seg, 7, 0, seg, 5, Wd - 0.4); P.front.rotation.z = -0.1;
+    P.rear = part(g, steel, -seg, 8.5, 0, seg, 7, Wd);
+    part(g, blk, 0, 4.8, 0, L - 1, 2, Wd + 0.3);                          // чёрный низ кузова
+    for (const sd of [-1, 1]) {
+      part(g, blk, 0, 8.2, sd * (Wd / 2 + 0.15), L - 4, 1.4, 0.4);         // молдинг
+      part(g, blk, -2, 17.1, sd * (Wd / 2 - 4.2), L * 0.3, 0.5, 0.5);     // шов двери-крыла
+    }
+    P.cabin = part(g, glass, -2, 14.2, 0, L * 0.34, 5.4, Wd - 3);
+    const ws = part(g, glass, L * 0.17, 13.4, 0, 8.5, 0.8, Wd - 3.4); ws.rotation.z = -0.62;   // лобовое
+    P.roof = part(g, steel, -2.5, 17.2, 0, L * 0.27, 1.2, Wd - 5);
+    for (let k = 0; k < 5; k++) {                                          // жалюзи
+      const sl = part(g, blk, -L * 0.2 - k * 1.9, 15.6 - k * 0.95, 0, 1, 0.7, Wd - 5); sl.rotation.z = 0.5;
+    }
+    part(g, blk, -L / 2 - 0.2, 8.5, 0, 0.5, 4, Wd - 9);                     // задняя решётка
+    part(g, blk, L / 2 + 0.1, 6.2, 0, 0.5, 2.4, Wd - 2);                    // бампер-решётка
+    part(g, glowMat('cyan', 0.55), 0, 0.5, 0, L * 0.7, 0.3, Wd * 0.7);      // подсветка днища
   } else {
     const seg = L / 3;
     P.rear = part(g, body, -seg, 8, 0, seg, 9, Wd);
@@ -199,8 +263,13 @@ function carModel(kind, color, isPlayer = false) {
     if (isPlayer) { P.stripeA = part(g, lambert('#f2f2f2'), 0, 12.6, -3, L - 2, 0.6, 2); P.stripeB = part(g, lambert('#f2f2f2'), 0, 12.6, 3, L - 2, 0.6, 2); }
   }
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) part(g, lambert('#0a0a0c'), sx * L * 0.32, 4, sz * (Wd / 2), 9, 8, 3);
-  g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
-  g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+  if (kind === 'delorean') {
+    g.userData.heads = [-1, 1].map((sd) => part(g, glowMat('white', 2.5), L / 2 + 0.3, 8.4, sd * (Wd / 2 - 4.5), 1, 2.2, 6.5));
+    g.userData.tail = [-1, 1].map((sd) => part(g, glowMat('red', 1), -L / 2 - 0.3, 9.5, sd * (Wd / 2 - 3.2), 1, 3, 6));
+  } else {
+    g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+    g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+  }
   if (!coneTex) { coneTex = new THREE.CanvasTexture(S.coneGlow); coneTex.colorSpace = THREE.SRGBColorSpace; }
   // по лучу от каждой фары
   const len = isPlayer ? 290 : 180;
@@ -222,7 +291,7 @@ function carModel(kind, color, isPlayer = false) {
   g.userData.L = L; g.userData.W = Wd;
   // исходные положения частей для модели повреждений
   g.userData.base = new Map();
-  g.traverse((o) => { if (o !== g) g.userData.base.set(o, { p: o.position.clone(), s: o.scale.clone() }); });
+  g.traverse((o) => { if (o !== g) g.userData.base.set(o, { p: o.position.clone(), s: o.scale.clone(), r: o.rotation.clone() }); });
   return g;
 }
 
@@ -272,15 +341,15 @@ const scorch = new THREE.Color('#161414');
 function applyDamage(m, P) {
   const { parts: Q, base, L, W: Wd } = m.userData;
   const d = P.dmg;
-  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.set(m.userData.isCone.has(o) ? -Math.PI / 2 : 0, 0, 0); }
+  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.copy(b.r); }
   const seg = L / 3;
   if (Q.front) {
     const k = d.front * 0.5;
-    Q.front.scale.x *= 1 - k; Q.front.position.x -= (seg * k) / 2; Q.front.rotation.z = -0.25 * d.front; Q.front.position.y += 1.5 * d.front;
+    Q.front.scale.x *= 1 - k; Q.front.position.x -= (seg * k) / 2; Q.front.rotation.z += -0.25 * d.front; Q.front.position.y += 1.5 * d.front;
   }
   if (Q.rear) {
     const k = d.rear * 0.45;
-    Q.rear.scale.x *= 1 - k; Q.rear.position.x += (seg * k) / 2; Q.rear.rotation.z = 0.2 * d.rear;
+    Q.rear.scale.x *= 1 - k; Q.rear.position.x += (seg * k) / 2; Q.rear.rotation.z += 0.2 * d.rear;
   }
   if (Q.mid) {
     const side = d.left - d.right;
@@ -356,17 +425,36 @@ export function createVoxel(cv) {
   renderer.setPixelRatio(1);
   renderer.toneMapping = THREE.NoToneMapping;
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(BG);
-  scene.fog = new THREE.Fog(BG, 1600, 3600);
-  const camera = new THREE.PerspectiveCamera(45, 1, 10, 9000);
-  scene.add(new THREE.HemisphereLight(0x7080b0, 0x080810, 0.55));
-  const moon = new THREE.DirectionalLight(0xa8b8ff, 0.5);
+  scene.background = new THREE.Color(FOG);
+  scene.fog = new THREE.Fog(FOG, 300, FOG_FAR);
+  const camera = new THREE.PerspectiveCamera(62, 1, 4, 11000);
+  scene.add(new THREE.HemisphereLight(0x8a5ac8, 0x100818, 0.6));
+  const moon = new THREE.DirectionalLight(0x6ad8ff, 0.4);
   moon.position.set(-0.6, 1, 0.8);
   scene.add(moon);
+  // небо: купол от светящейся дымки у горизонта к чёрному зениту, идёт за камерой
+  const sky = (() => {
+    const geo = new THREE.SphereGeometry(10000, 32, 20);
+    const pos = geo.attributes.position, cs = [];
+    const top = new THREE.Color('#020108'), mid = new THREE.Color('#180826'), hor = new THREE.Color('#5c1a60'), low = new THREE.Color(FOG);
+    const c = new THREE.Color();
+    for (let k = 0; k < pos.count; k++) {
+      const h = pos.getY(k) / 10000;
+      if (h < 0) c.copy(low);
+      else if (h < 0.08) c.copy(hor).lerp(mid, h / 0.08);
+      else c.copy(mid).lerp(top, Math.min(1, (h - 0.08) / 0.5));
+      cs.push(c.r, c.g, c.b);
+    }
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(cs, 3));
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
+    m.renderOrder = -10; m.frustumCulled = false;
+    scene.add(m);
+    return m;
+  })();
 
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.45, 0.7);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.9, 0.5, 0.62);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
@@ -377,6 +465,8 @@ export function createVoxel(cv) {
   const glassMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: mullionTex(), emissive: 0x0d1a22 });
   // стёкла вестибюлей — полупрозрачные
   const paneMat = new THREE.MeshLambertMaterial({ color: 0x9fd8ff, emissive: 0x3a5a6a, transparent: true, opacity: 0.38, depthWrite: false });
+  const holoMat = new THREE.MeshBasicMaterial({ map: adAtlas(), color: new THREE.Color(1.5, 1.5, 1.5), transparent: true, opacity: 0.92,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
   const solidMat2 = solidMat.clone();
   solidMat2.side = THREE.DoubleSide;
 
@@ -384,7 +474,7 @@ export function createVoxel(cv) {
   const blocks = new Map();
   const cars = new Map();
   const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpS = new THREE.Vector3(1, 1, 1), tmpP = new THREE.Vector3();
-  let playerModel = null, playerGen = -1;
+  let playerModel = null, playerGen = -1, playerCol = null;
   const shadow = new THREE.Mesh(new THREE.PlaneGeometry(50, 26), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4, depthWrite: false }));
   scene.add(shadow);
   // светофоры: столбы — отдельные меши, огни — один инстанс на все
@@ -418,7 +508,7 @@ export function createVoxel(cv) {
   function syncSignals(st, T) {
     const want = new Set();
     for (let i = W.colAt(T.x - 1700); i <= W.colAt(T.x + 1700) + 1; i++) {
-      for (let j = W.rowAt(T.z - 2000); j <= W.rowAt(T.z + 1000) + 1; j++) {
+      for (let j = W.rowAt(T.z - 1700); j <= W.rowAt(T.z + 1700) + 1; j++) {
         const key = i + ',' + j;
         want.add(key);
         if (!signals.has(key)) signals.set(key, buildSignal(i, j));
@@ -606,9 +696,46 @@ export function createVoxel(cv) {
       for (const l of W.getBlock(i, j).lamps) lamps.add(l);
     }
     const e = bakeGround(ch.canvas, x0, y0, CS, TEX, lamps, ch.lamps, procZebras);
+    addRiverBed(e.grp, x0, y0, CS);
     releaseCanvas(ch);
     e.rebake = () => bakeChunk(buildChunkAt(ch.cx, ch.cy));
     return e;
+  }
+  // Русло реки ниже уровня улиц: бетонные стенки набережной и тёмная вода с отсветами неона
+  const waterMat = new THREE.MeshLambertMaterial({ color: 0x07121f, emissive: 0x0a0618 });
+  const wallMat = new THREE.MeshLambertMaterial({ color: 0x4a4a58, emissive: 0x16121e, side: THREE.DoubleSide });
+  function addRiverBed(grp, x0, y0, size) {
+    const g = new Geo(), wc = col('#ffffff');
+    let any = false;
+    const D = W.RIVER_D + 4;
+    for (let m = Math.floor((y0 - 1500) / W.RP); m <= Math.floor((y0 + size + 1500) / W.RP); m++) {
+      if (!W.riverExists(m)) continue;
+      for (let x = x0; x < x0 + size; x += 16) {
+        const xb = x + 16;
+        for (const side of [-1, 1]) {
+          const ya = W.riverY(m, x) + side * W.riverHV(m, x), yb = W.riverY(m, xb) + side * W.riverHV(m, xb);
+          const ym = (ya + yb) / 2;
+          if (ym < y0 - 8 || ym >= y0 + size + 8) continue;
+          any = true;
+          g.quad([x, 0.5, ya], [x, -D, ya], [xb, -D, yb], [xb, 0.5, yb], [0, 0, -side], wc);
+        }
+      }
+    }
+    if (!any) return;
+    grp.add(new THREE.Mesh(g.build(), wallMat));
+    const water = new THREE.Mesh(new THREE.PlaneGeometry(size, size), waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.position.set(x0 + size / 2, -W.RIVER_D + 6, y0 + size / 2);
+    grp.add(water);
+    // отражения неоновых вывесок — длинные размытые блики на воде
+    const gl = new Geo();
+    for (let k = 0; k < 40; k++) {
+      const x = x0 + hashU(x0, y0, k) % size, z = y0 + hashU(x0, y0, k + 99) % size;
+      if (!W.isRiver(x, z)) continue;
+      const c = glowCol(['pink', 'cyan', 'purple', 'yellow'][k % 4], 0.7);
+      gl.box(x - 1.5, -W.RIVER_D + 6.2, z - 14 - (k % 3) * 8, x + 1.5, -W.RIVER_D + 6.4, z + 14 + (k % 3) * 8, c, c);
+    }
+    if (!gl.empty()) grp.add(new THREE.Mesh(gl.build(), glowMatV));
   }
   function procZebras(g, x0, y0, k) {
     g.fillStyle = 'rgba(255,255,255,0.2)';
@@ -621,8 +748,9 @@ export function createVoxel(cv) {
         for (const d of ds) if (Math.abs(W.diagSigned(d, rx + rw / 2, ry + rh / 2)) < W.DIAG_W / 2 + W.SW) return;
         g.fillRect((rx - x0) * k, (ry - y0) * k, rw * k, rh * k);
       };
-      for (let u = -hw + 5; u < hw - 8; u += 11) { R(x + u, y - hh - 22, 6, 18); R(x + u, y + hh + 4, 6, 18); }
-      for (let u = -hh + 5; u < hh - 8; u += 11) { R(x - hw - 22, y + u, 18, 6); R(x + hw + 4, y + u, 18, 6); }
+      const up = W.vSegExists(i, j - 1), dn = W.vSegExists(i, j), lf = W.hSegExists(i - 1, j), rt = W.hSegExists(i, j);
+      for (let u = -hw + 5; u < hw - 8; u += 11) { if (up) R(x + u, y - hh - 22, 6, 18); if (dn) R(x + u, y + hh + 4, 6, 18); }
+      for (let u = -hh + 5; u < hh - 8; u += 11) { if (lf) R(x - hw - 22, y + u, 18, 6); if (rt) R(x + hw + 4, y + u, 18, 6); }
     }
   }
   // Ночная текстура куска земли: исходник × темнота − пятна фонарей + цветное свечение.
@@ -657,6 +785,9 @@ export function createVoxel(cv) {
     }
     g.globalAlpha = 1;
     if (extra) extra(g, x0, y0, k);
+    // вырезы (русла рек) остаются прозрачными после затемнения и подсветки
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(src, 0, 0, texN, texN);
     g.globalCompositeOperation = 'source-over';
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
@@ -664,7 +795,7 @@ export function createVoxel(cv) {
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.anisotropy = 4;
     const grp = new THREE.Group();
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ map: tex }));
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({ map: tex, alphaTest: 0.5 }));
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(x0 + size / 2, 0, y0 + size / 2);
     grp.add(ground);
@@ -678,7 +809,7 @@ export function createVoxel(cv) {
       solid.box(l.x - 1.5, 0, l.y - 1.5, l.x + 1.5, 56, l.y + 1.5, poleC);
       const ax = Math.abs(l.lx - l.x) < 1, az = Math.abs(l.ly - l.y) < 1;
       if (ax !== az) solid.box(Math.min(l.x, l.lx) - 1, 54, Math.min(l.y, l.ly) - 1, Math.max(l.x, l.lx) + 1, 56, Math.max(l.y, l.ly) + 1, poleC);
-      glow.box(l.lx - 5, 51, l.ly - 3, l.lx + 5, 54, l.ly + 3, glowCol(l.c, 2.6), glowCol(l.c, 2.6), null, true);
+      glow.box(l.lx - 5, 51, l.ly - 3, l.lx + 5, 54, l.ly + 3, glowCol(l.c, 1.9), glowCol(l.c, 1.9), null, true);
     }
     if (!solid.empty()) grp.add(new THREE.Mesh(solid.build(), solidMat));
     if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
@@ -695,9 +826,9 @@ export function createVoxel(cv) {
   const TREE_C = ['#1f3d24', '#25472b', '#2d4d25', '#1d3826'];
   const lighten = (hex, toward, t) => new THREE.Color(hex).lerp(new THREE.Color(toward), t);
   function buildBlock(B) {
-    const solid = new Geo(), glow = new Geo(), glass = new Geo();
+    const solid = new Geo(), glow = new Geo(), glass = new Geo(), bill = new Geo();
     const cranes = [];
-    for (const b of B.buildings) addBuilding(b, solid, glow, glass, cranes);
+    for (const b of B.buildings) addBuilding(b, solid, glow, glass, cranes, bill);
     for (const t of B.trees) {
       const tr = col('#2a2018');
       solid.box(t.x - 2.5, 0, t.y - 2.5, t.x + 2.5, 12, t.y + 2.5, tr);
@@ -733,6 +864,7 @@ export function createVoxel(cv) {
     if (!wedge.empty()) grp.add(new THREE.Mesh(wedge.build(), solidMat2));
     if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
     if (!glass.empty()) grp.add(new THREE.Mesh(glass.build(), glassMat));
+    if (!bill.empty()) { const m = new THREE.Mesh(bill.build(), holoMat); m.renderOrder = 3; grp.add(m); }
     for (const c of cranes) grp.add(c.jib);
     const entry = { grp, cranes, B, panes: null };
     buildPanes(entry);
@@ -807,7 +939,7 @@ export function createVoxel(cv) {
   }
   const B_ramp = (gr) => ({ ...gr.ramp, axis: gr.horiz ? 'x' : 'y', dir: gr.flip ? -1 : 1, dh: gr.dh });
 
-  function addBuilding(b, solid, glow, glass, cranes) {
+  function addBuilding(b, solid, glow, glass, cranes, bill) {
     const h = b.height;
     const x0 = b.x, z0 = b.y, x1 = b.x + b.w, z1 = b.y + b.h;
     if (b.crane) {
@@ -864,7 +996,7 @@ export function createVoxel(cv) {
       for (let x = x0 + 4; x < x1 - 2; x += 14) { glow.cube(x, h + 1, z0, 2, gc); glow.cube(x, h + 1, z1, 2, gc); }
       for (let z = z0 + 4; z < z1 - 2; z += 14) { glow.cube(x0, h + 1, z, 2, gc); glow.cube(x1, h + 1, z, 2, gc); }
     } else {
-      const wall = lighten(b.wall, '#3c4458', 0.35), roof = lighten(b.roof, '#4a5060', 0.25);
+      const wall = lighten(b.wall, '#4a4a6a', 0.5), roof = lighten(b.roof, '#4a5060', 0.25);
       const s = hashU(b.seed, 1, 2);
       const win = b.lit > 0 ? [((s % 32) * 2) / 64, (((s >>> 5) % 32) * 2) / 64, 1 / 7 / 64, 1 / 10 / 64] : null;
       if (b.lobby) {
@@ -906,165 +1038,113 @@ export function createVoxel(cv) {
       glow.box(x0, h + 2, z0, x1, h + 4, z0 + 1.5, c, c, null, true); glow.box(x0, h + 2, z1 - 1.5, x1, h + 4, z1, c, c, null, true);
       glow.box(x0, h + 2, z0, x0 + 1.5, h + 4, z1, c, c, null, true); glow.box(x1 - 1.5, h + 2, z0, x1, h + 4, z1, c, c, null, true);
     }
+    if (b.tune) tuneDress(b, solid, glow);
     if (b.style === 'canopy') glow.box(x0 + 4, h - 2, z0 + 4, x1 - 4, h - 1, z1 - 4, glowCol('white', 1.6), glowCol('white', 1.6), null, true);
+    if (h > 150) neonDress(b, solid, glow, bill);
+  }
+
+  // Мастерская «Неон-тюн»: тёмные ворота в неоновой раме, светящийся козырёк и полоса по крыше
+  function tuneDress(b, solid, glow) {
+    const T = b.tune, D = T.door, h = b.height;
+    const pink = glowCol('pink', 2), cyan = glowCol('cyan', 1.6), dim = glowCol('purple', 0.9);
+    // локальные координаты: u — от фасада наружу к улице, v — вдоль ворот от их края
+    const fx = D.x + D.w / 2, fz = D.y + D.h / 2, along = T.nx ? D.h : D.w;
+    const at = (u, v) => (T.nx ? [fx - T.nx * u, D.y + v] : [D.x + v, fz - T.ny * u]);
+    const R = (u0, u1, v0, v1, y0, y1, c, g) => {
+      const [x0, z0] = at(u0, v0), [x1, z1] = at(u1, v1);
+      (g || glow).box(Math.min(x0, x1), y0, Math.min(z0, z1), Math.max(x0, x1), y1, Math.max(z0, z1), c, c, null, true);
+    };
+    R(-0.5, 1.5, 0, along, 0, 30, col('#07060a'), solid);       // проём
+    R(0, 2.5, -3, 0, 0, 33, pink); R(0, 2.5, along, along + 3, 0, 33, pink); R(0, 2.5, -3, along + 3, 30, 33, pink);
+    R(2, 18, -10, along + 10, 36, 38, cyan);                    // козырёк
+    for (let k = 1; k < 5; k++) R(1.6, 2, (along * k) / 5 - 0.5, (along * k) / 5 + 0.5, 2, 29, dim); // ламели ворот
+    const c = cyan;
+    glow.box(b.x, h, b.y, b.x + b.w, h + 2, b.y + 1.5, c, c, null, true); glow.box(b.x, h, b.y + b.h - 1.5, b.x + b.w, h + 2, b.y + b.h, c, c, null, true);
+    glow.box(b.x, h, b.y, b.x + 1.5, h + 2, b.y + b.h, c, c, null, true); glow.box(b.x + b.w - 1.5, h, b.y, b.x + b.w, h + 2, b.y + b.h, c, c, null, true);
+  }
+
+  // Киберпанк-фасад: неоновые пояса, вертикальные вывески, голограммы, шпили с огнями
+  const NEONS = ['pink', 'cyan', 'purple', 'green', 'yellow', 'blue', 'orange'];
+  // грани здания: центр грани, наружная нормаль и направление «вправо» для зрителя снаружи
+  function faces(b) {
+    const x0 = b.x, z0 = b.y, x1 = b.x + b.w, z1 = b.y + b.h;
+    return [
+      { cx: (x0 + x1) / 2, cz: z0, nx: 0, nz: -1, rx: -1, rz: 0, len: b.w },
+      { cx: (x0 + x1) / 2, cz: z1, nx: 0, nz: 1, rx: 1, rz: 0, len: b.w },
+      { cx: x0, cz: (z0 + z1) / 2, nx: -1, nz: 0, rx: 0, rz: 1, len: b.h },
+      { cx: x1, cz: (z0 + z1) / 2, nx: 1, nz: 0, rx: 0, rz: -1, len: b.h },
+    ];
+  }
+  function neonDress(b, solid, glow, bill) {
+    const h = b.height, x0 = b.x, z0 = b.y, x1 = b.x + b.w, z1 = b.y + b.h;
+    const H = (k) => hashU(b.seed & 0xffffff, k, 4321);
+    const R = (k) => (H(k) % 10000) / 10000;
+    const F = faces(b);
+    // светящиеся пояса через несколько этажей
+    if (R(1) < 0.45) {
+      const c = glowCol(NEONS[H(2) % NEONS.length], 1.5);
+      const step = 120 + R(3) * 260;
+      for (let y = 60 + R(4) * 80; y < h - 20; y += step) {
+        glow.box(x0 - 1, y, z0 - 1, x1 + 1, y + 1.6, z0 + 0.6, c, c); glow.box(x0 - 1, y, z1 - 0.6, x1 + 1, y + 1.6, z1 + 1, c, c);
+        glow.box(x0 - 1, y, z0, x0 + 0.6, y + 1.6, z1, c, c); glow.box(x1 - 0.6, y, z0, x1 + 1, y + 1.6, z1, c, c);
+      }
+    }
+    // светящиеся рёбра
+    if (R(5) < 0.35) {
+      const c = glowCol(NEONS[H(6) % NEONS.length], 1.3);
+      for (const [px, pz] of [[x0, z0], [x1, z0], [x0, z1], [x1, z1]]) glow.box(px - 1, 30, pz - 1, px + 1, h, pz + 1, c, c);
+    }
+    // вертикальная вывеска-«лезвие» у угла на нижних этажах
+    if (R(7) < 0.6) {
+      const f = F[H(8) % 4];
+      const c = glowCol(NEONS[H(9) % NEONS.length], 1.8), dark = col('#0a0812');
+      const len = Math.min(h - 40, 80 + R(10) * 180);
+      const along = (R(11) - 0.5) * f.len * 0.7;
+      const bx = f.cx + f.rx * along, bz = f.cz + f.rz * along;
+      const ox = f.nx, oz = f.nz;
+      // плоскость вывески перпендикулярна стене
+      const ax0 = Math.min(bx, bx + ox * 22), ax1 = Math.max(bx, bx + ox * 22), az0 = Math.min(bz, bz + oz * 22), az1 = Math.max(bz, bz + oz * 22);
+      const thin = (a0, a1) => (a1 - a0 < 1 ? [a0 - 1.2, a1 + 1.2] : [a0, a1]);
+      const [sx0, sx1] = thin(ax0, ax1), [sz0, sz1] = thin(az0, az1);
+      solid.box(sx0, 34, sz0, sx1, 34 + len, sz1, dark);
+      const [ex0, ex1] = thin(ax0 - 0.3, ax1 + 0.3), [ez0, ez1] = thin(az0 - 0.3, az1 + 0.3);
+      glow.box(ex0, 34, ez0, ex1, 36, ez1, c, c); glow.box(ex0, 32 + len, ez0, ex1, 34 + len, ez1, c, c);
+      for (let y = 46; y < 30 + len; y += 18) glow.box(ex0 + (ox ? 4 : 0), y, ez0 + (oz ? 4 : 0), ex1 - (ox ? 4 : 0), y + 9, ez1 - (oz ? 4 : 0), c, c);
+    }
+    // голограмма-реклама на одной-двух гранях
+    const nb = h > 400 ? 1 + (R(12) < 0.5 ? 1 : 0) : R(12) < 0.45 ? 1 : 0;
+    for (let k = 0; k < nb; k++) {
+      const f = F[(H(13) + k * 2) % 4];
+      if (f.len < 50) continue;
+      const w = Math.min(f.len * 0.8, 90 + R(14 + k) * 110), hh = w * 0.5;
+      const y = 50 + R(16 + k) * Math.max(10, Math.min(h - hh - 30, 520) - 50);
+      const ad = H(18 + k) % ADS.length;
+      const u0 = (ad % 2) * 0.5, v1 = 1 - ((ad / 2) | 0) * 0.25, v0 = v1 - 0.25;
+      const cx = f.cx + f.nx * 4, cz = f.cz + f.nz * 4;
+      const L = [cx - f.rx * w / 2, cz - f.rz * w / 2], Rt = [cx + f.rx * w / 2, cz + f.rz * w / 2];
+      bill.quad([L[0], y, L[1]], [L[0], y + hh, L[1]], [Rt[0], y + hh, Rt[1]], [Rt[0], y, Rt[1]], [f.nx, 0, f.nz], col('#ffffff'),
+        [u0, v0, u0, v1, u0 + 0.5, v1, u0 + 0.5, v0]);
+    }
+    // шпиль с мигающим огнём на самых высоких
+    if (h > 900 && b.w > 50 && b.h > 50) {
+      const sh = 80 + R(20) * 260;
+      solid.box(b.cx - 3, h, b.cy - 3, b.cx + 3, h + sh, b.cy + 3, col('#3a3e48'));
+      glow.cube(b.cx, h + sh + 3, b.cy, 7, glowCol('red', 3.2));
+      const c = glowCol(NEONS[H(21) % NEONS.length], 1.6);
+      glow.box(x0, h + 2, z0, x1, h + 4, z0 + 1.5, c, c); glow.box(x0, h + 2, z1 - 1.5, x1, h + 4, z1, c, c);
+      glow.box(x0, h + 2, z0, x0 + 1.5, h + 4, z1, c, c); glow.box(x1 - 1.5, h + 2, z0, x1, h + 4, z1, c, c);
+    }
   }
   function dropBlock(e) {
     scene.remove(e.grp);
     e.grp.traverse((o) => { if (o.geometry && o.geometry !== unitBox) o.geometry.dispose(); });
   }
 
-  // ---------------------------------------------------------------- Москва (OSM)
-  const H_CAP = 650; // видимая высота ограничена, чтобы небоскрёбы не упирались в камеру
-  const OSM_COL = {
-    house: '#3a332e', detached: '#3a332e', garage: '#34363a', garages: '#34363a', industrial: '#33363a', warehouse: '#33363a',
-    church: '#4a4038', cathedral: '#4a4038', apartments: '#2a2f3a', office: '#28303a', commercial: '#2e2c33', retail: '#33302e',
-  };
-  function prism(G, b, glow) {
-    const h = Math.min(b.height, H_CAP), z0 = Math.min(b.minH || 0, h - 4);
-    const hex = (v) => /^#[0-9a-f]{6}$/i.test(v || '');
-    const wall = lighten(OSM_COL[b.kind] || (hex(b.wall) ? b.wall : '#2b2e35'), '#3c4458', 0.35);
-    const roof = lighten(hex(b.roof) ? b.roof : '#3a3d44', '#4a5060', 0.2).multiplyScalar(0.8);
-    const s = b.seed;
-    const win = b.lit > 0.1 && h > 60 ? [((s % 32) * 2) / 64, (((s >>> 5) % 32) * 2) / 64, 1 / 7 / 64, 1 / 10 / 64] : null;
-    const pts = b.pts, n = pts.length / 2;
-    for (let i = 0, j = n - 1; i < n; j = i++) {
-      const ax = pts[j * 2], ay = pts[j * 2 + 1], bx = pts[i * 2], by = pts[i * 2 + 1];
-      const len = Math.hypot(bx - ax, by - ay);
-      if (len < 0.5) continue;
-      const nx = b.normals[i * 2], ny = b.normals[i * 2 + 1];
-      const uv = win ? [win[0], win[1] + z0 * win[3], win[0], win[1] + h * win[3], win[0] + len * win[2], win[1] + h * win[3], win[0] + len * win[2], win[1] + z0 * win[3]] : null;
-      // порядок вершин подбираем под нормаль наружу
-      const A = [ax, z0, ay], Bt = [ax, h, ay], Ct = [bx, h, by], D = [bx, z0, by];
-      const ex = bx - ax, ey = by - ay;
-      // нормаль квада (b-a)×(c-a) для A,Bt,Ct,D равна (ey*dh, 0, -ex*dh) — сравниваем с нужной
-      if (ey * nx - ex * ny > 0) G.quad(A, Bt, Ct, D, [nx, 0, ny], wall, uv);
-      else G.quad(D, Ct, Bt, A, [nx, 0, ny], wall, uv ? [uv[6], uv[7], uv[4], uv[5], uv[2], uv[3], uv[0], uv[1]] : null);
-    }
-    // крыша
-    const contour = [], holes = [];
-    for (let i = 0; i < n; i++) contour.push(new THREE.Vector2(pts[i * 2], pts[i * 2 + 1]));
-    for (const hr of b.holes || []) { const hh = []; for (let i = 0; i < hr.length; i += 2) hh.push(new THREE.Vector2(hr[i], hr[i + 1])); holes.push(hh); }
-    let faces = [];
-    try { faces = THREE.ShapeUtils.triangulateShape(contour, holes); } catch (e) { faces = []; }
-    const all = contour.concat(...holes);
-    for (const [a, bq, c] of faces) {
-      const A = all[a], Bv = all[bq], Cv = all[c];
-      // смотрим, чтобы треугольник был лицом вверх
-      const cr = (Bv.x - A.x) * (Cv.y - A.y) - (Bv.y - A.y) * (Cv.x - A.x);
-      if (cr < 0) G.tri([A.x, h, A.y], [Bv.x, h, Bv.y], [Cv.x, h, Cv.y], [0, 1, 0], roof);
-      else G.tri([A.x, h, A.y], [Cv.x, h, Cv.y], [Bv.x, h, Bv.y], [0, 1, 0], roof);
-    }
-    if (b.height > 900 && glow) glow.cube(b.cx, h + 4, b.cy, 6, glowCol('red', 3));
-  }
-  function buildOSMTile(t) {
-    const solid = new Geo(), glow = new Geo();
-    for (const b of t.buildings) prism(solid, b, glow);
-    for (const tr of t.trees) {
-      solid.box(tr.x - 2.5, 0, tr.y - 2.5, tr.x + 2.5, 12, tr.y + 2.5, col('#2a2018'));
-      const c = col(TREE_C[tr.v % 4], 1.3), c2 = col(TREE_C[(tr.v + 1) % 4], 1.6), r = tr.r * 0.8;
-      if (tr.kind === 1) {
-        solid.box(tr.x - r, 10, tr.y - r, tr.x + r, 22, tr.y + r, c);
-        solid.box(tr.x - r * 0.65, 22, tr.y - r * 0.65, tr.x + r * 0.65, 34, tr.y + r * 0.65, c);
-        solid.box(tr.x - r * 0.3, 34, tr.y - r * 0.3, tr.x + r * 0.3, 44, tr.y + r * 0.3, c2);
-      } else {
-        solid.box(tr.x - r, 12, tr.y - r, tr.x + r, 12 + r * 1.2, tr.y + r, c);
-        solid.box(tr.x - r * 0.6, 12 + r * 1.2, tr.y - r * 0.6, tr.x + r * 0.6, 12 + r * 1.7, tr.y + r * 0.6, c2);
-      }
-    }
-    // подвесные светофоры над перекрёстками
-    for (const sg of t.signals) solid.box(sg.x - 5, 40, sg.y - 5, sg.x + 5, 56, sg.y + 5, col('#15171b'), col('#15171b'), null, true);
-    const grp = new THREE.Group();
-    if (!solid.empty()) grp.add(new THREE.Mesh(solid.build(), solidMat2));
-    if (!glow.empty()) grp.add(new THREE.Mesh(glow.build(), glowMatV));
-    scene.add(grp);
-    return { grp, cranes: [], B: { panes: [] }, panes: null };
-  }
-  function manageOSM(T, budget) {
-    OSM.requestAround(T.x, T.z, T.vx || 0, T.vy || 0);
-    const GCs = OSM.GROUND;
-    const need = [];
-    const want = new Set();
-    for (let gx = Math.floor((T.x - CHUNK_R) / GCs); gx <= Math.floor((T.x + CHUNK_R) / GCs); gx++) {
-      for (let gy = Math.floor((T.z - CHUNK_R * 1.2) / GCs); gy <= Math.floor((T.z + CHUNK_R * 0.6) / GCs); gy++) {
-        const key = 'o' + gx + ',' + gy;
-        want.add(key);
-        if (!chunks.has(key)) need.push([gx, gy, Math.hypot((gx + 0.5) * GCs - T.x, (gy + 0.5) * GCs - T.z)]);
-      }
-    }
-    for (const [key, e] of chunks) if (!want.has(key)) { dropChunk(e); chunks.delete(key); }
-    need.sort((a, b) => a[2] - b[2]);
-    let left = budget, waiting = 0;
-    // догрузились реки/парки — перепекаем уже показанные куски (по одному за кадр)
-    for (const [key, e] of chunks) {
-      if (e.epoch === OSM.groundEpoch) continue;
-      const ne = e.rebake();
-      if (ne) { chunks.set(key, ne); dropChunk(e); }
-      break;
-    }
-    for (const [gx, gy] of need) {
-      if (left <= 0) { waiting++; continue; }
-      const e = bakeOSM(gx, gy);
-      if (!e) { waiting++; continue; }
-      chunks.set('o' + gx + ',' + gy, e);
-      left--;
-    }
-    // здания кусками по 600 м
-    const bwant = new Set();
-    for (const t of OSM.tilesIn(T.x - BLOCK_R, T.z - BLOCK_R * 1.25, T.x + BLOCK_R, T.z + BLOCK_R * 0.55)) {
-      const key = 't' + t.tx + ',' + t.ty;
-      bwant.add(key);
-      const old = blocks.get(key);
-      if (old && old.ver !== (t.ver || 0) && left-- > 0) { dropBlock(old); blocks.delete(key); }
-      if (!blocks.has(key) && left-- > 0) { const e = buildOSMTile(t); e.ver = t.ver || 0; blocks.set(key, e); }
-    }
-    for (const [key, e] of blocks) if (!bwant.has(key)) { dropBlock(e); blocks.delete(key); }
-    return waiting;
-  }
-  function bakeOSM(gx, gy) {
-    const ch = OSM.groundChunk(gx, gy);
-    if (!ch) return null;
-    const all = OSM.groundLampsAround(ch.x0 - 200, ch.y0 - 200, ch.x0 + ch.size + 200, ch.y0 + ch.size + 200);
-    const e = bakeGround(ch.canvas, ch.x0, ch.y0, ch.size, 512, all, ch.lamps, null);
-    OSM.releaseGround(ch);
-    e.epoch = OSM.groundEpoch;
-    e.rebake = () => bakeOSM(gx, gy);
-    return e;
-  }
-  function syncSignalsOSM(st, T) {
-    let n = 0;
-    for (const t of OSM.tilesIn(T.x - 1700, T.z - 2000, T.x + 1700, T.z + 1000)) {
-      for (const sg of t.signals) {
-        const ph = ((hashU(sg.id % 1000003, 7, 7) % 1000) / 1000) * 16;
-        const p = (st.time + ph) % 16;
-        const sst = p < 6.5 ? 0 : p < 8 ? 1 : p < 14.5 ? 2 : 3;
-        for (const [dx, dz, ax] of [[1, 0, 'h'], [-1, 0, 'h'], [0, 1, 'v'], [0, -1, 'v']]) {
-          const go = ax === 'h' ? sst === 0 : sst === 2, amber = ax === 'h' ? sst === 1 : sst === 3;
-          const cols = [!go && !amber ? SIG.red : SIG.off, amber ? SIG.yellow : SIG.off, go ? SIG.green : SIG.off];
-          for (let k = 0; k < 3; k++) {
-            if (n >= MAXS) break;
-            tmpP.set(sg.x + dx * 5.4, 53 - k * 5, sg.y + dz * 5.4);
-            tmpS.set(3.6, 3.6, 3.6);
-            tmpM.compose(tmpP, tmpQ.identity(), tmpS);
-            sigMesh.setMatrixAt(n, tmpM);
-            sigMesh.setColorAt(n, cols[k]);
-            n++;
-          }
-        }
-      }
-    }
-    tmpS.set(1, 1, 1);
-    sigMesh.count = n;
-    sigMesh.instanceMatrix.needsUpdate = true;
-    if (sigMesh.instanceColor) sigMesh.instanceColor.needsUpdate = true;
-  }
-
-  // ---------------------------------------------------------------- кадр
-  let built = 0;
   function manage(T, budget) {
     // земля
     const need = [];
     const cx0 = Math.floor((T.x - CHUNK_R) / CS), cx1 = Math.floor((T.x + CHUNK_R) / CS);
-    const cy0 = Math.floor((T.z - CHUNK_R * 1.2) / CS), cy1 = Math.floor((T.z + CHUNK_R * 0.6) / CS);
+    const cy0 = Math.floor((T.z - CHUNK_R) / CS), cy1 = Math.floor((T.z + CHUNK_R) / CS);
     const want = new Set();
     for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
       const key = cx + ',' + cy;
@@ -1077,13 +1157,12 @@ export function createVoxel(cv) {
     for (const [cx, cy] of need) {
       if (left-- <= 0) break;
       chunks.set(cx + ',' + cy, bakeChunk(buildChunkAt(cx, cy)));
-      built++;
     }
     // кварталы
     const bneed = [];
     const bwant = new Set();
     for (let i = W.colAt(T.x - BLOCK_R); i <= W.colAt(T.x + BLOCK_R); i++) {
-      for (let j = W.rowAt(T.z - BLOCK_R * 1.25); j <= W.rowAt(T.z + BLOCK_R * 0.55); j++) {
+      for (let j = W.rowAt(T.z - BLOCK_R); j <= W.rowAt(T.z + BLOCK_R); j++) {
         const key = i + ',' + j;
         bwant.add(key);
         if (!blocks.has(key)) { const B = W.getBlock(i, j); bneed.push([B, Math.hypot(B.cx - T.x, B.cy - T.z)]); }
@@ -1110,8 +1189,16 @@ export function createVoxel(cv) {
       }
       m.position.set(c.x, c.z || 0, c.y);
       m.rotation.set(0, -c.a, c.pitch || 0);
+      // за туманом машину не рисуем
+      m.visible = Math.abs(c.x - camera.position.x) + Math.abs(c.y - camera.position.z) < 3000;
+      if (!m.visible) { seen.add(c); continue; }
       const tm = c.brake ? glowMat('red', 3) : glowMat('red', 1);
       for (const t of m.userData.tail) t.material = tm;
+      if (c.hazard) { // аварийка
+        const on = Math.sin(st.time * 7) > 0, hm = on ? glowMat('orange', 3) : glowMat('red', 0.4);
+        for (const t of m.userData.tail) t.material = hm;
+        for (const t of m.userData.heads) t.material = on ? glowMat('orange', 3) : glowMat('white', 0.6);
+      }
       if (m.userData.bar) {
         const on = !c.wreck && Math.sin(st.time * 14 + (c.cop ? 1 : 0)) > 0;
         m.userData.bar[0].visible = on; m.userData.bar[1].visible = !on && !c.wreck;
@@ -1123,9 +1210,15 @@ export function createVoxel(cv) {
     }
     for (const [c, m] of cars) if (!seen.has(c)) { scene.remove(m); cars.delete(c); }
     const P = st.player;
-    if (!playerModel || playerGen !== P.gen) {
+    if (!playerModel || playerGen !== P.gen || playerCol !== P.color) {
       if (playerModel) scene.remove(playerModel);
-      playerModel = carModel('sport', '#d8262a', true); scene.add(playerModel); playerGen = P.gen;
+      playerCol = P.color;
+      playerModel = carModel('delorean', P.color || '#c8ccd4', true); scene.add(playerModel); playerGen = P.gen;
+    }
+    // выхлоп нитро
+    if (P.boosting) for (const s of [-1, 1]) {
+      const bx = P.x - Math.cos(P.a) * 26 - Math.sin(P.a) * s * 6, bz = P.y - Math.sin(P.a) * 26 + Math.cos(P.a) * s * 6;
+      fire(bx, (P.z || 0) + 6, bz, 1, 2);
     }
     applyDamage(playerModel, P);
     playerModel.position.set(P.x, P.z, P.y);
@@ -1272,9 +1365,14 @@ export function createVoxel(cv) {
       const c = glowCol('white', 1).set(mk.col).multiplyScalar(mk.k || 2);
       for (const o of Object.values(m)) o.material.color.copy(c);
       const pulse = 1 + Math.sin(st.time * 5) * 0.06;
-      if (mk.kind === 'beam') {
-        m.beam.visible = m.ring.visible = true;
-        m.beam.position.set(mk.x, 0, mk.y); m.beam.scale.set(mk.r * 0.75, 420, mk.r * 0.75);
+      if (mk.kind === 'beam' || mk.kind === 'shop') {
+        // столб света бледный и гаснет вблизи, чтобы не закрывать обзор; у мастерской — только кольцо
+        const d = Math.hypot(mk.x - st.player.x, mk.y - st.player.y);
+        m.beam.visible = mk.kind === 'beam' && d > 160;
+        m.beam.material.opacity = 0.075 * Math.min(1, (d - 160) / 600);
+        m.ring.visible = true;
+        m.ring.material.opacity = mk.kind === 'shop' ? 0.55 : 0.7;
+        m.beam.position.set(mk.x, 0, mk.y); m.beam.scale.set(mk.r * 0.45, 260, mk.r * 0.45);
         m.ring.position.set(mk.x, 1.5, mk.y); m.ring.scale.set(mk.r * pulse, 1, mk.r * pulse);
       } else if (mk.kind === 'pickup') {
         m.pick.visible = m.ring.visible = true;
@@ -1324,6 +1422,163 @@ export function createVoxel(cv) {
     for (let k = n; k < trainPool.length; k++) trainPool[k].visible = false;
   }
 
+  // ---------------------------------------------------------------- горизонт гигаполиса
+  // За пределами дымки — бесконечное поле мегабашен в километры высотой: тёмные силуэты
+  // с редкими окнами и красными огнями. Пересобирается, когда игрок уходит на 2 км.
+  const skyMat = new THREE.MeshBasicMaterial({ vertexColors: true, map: skylineAtlas(), fog: false });
+  const skyGlowMat = new THREE.MeshBasicMaterial({ vertexColors: true, fog: false, toneMapped: false });
+  let skyline = null, skyKey = '';
+  function syncSkyline(px, pz) {
+    const SNAP = 2000, C = 760;
+    const ci = Math.round(px / SNAP), cj = Math.round(pz / SNAP);
+    const key = ci + ',' + cj;
+    if (key === skyKey) return;
+    skyKey = key;
+    if (skyline) { scene.remove(skyline); skyline.traverse((o) => o.geometry && o.geometry.dispose()); }
+    const cx = ci * SNAP, cz = cj * SNAP, R0 = FOG_FAR + SNAP * 0.75, R1 = 9500;
+    const g = new Geo(), gl = new Geo();
+    const haze = new THREE.Color(1.5, 0.75, 1.7), near = new THREE.Color(0.95, 0.9, 1.05), c = new THREE.Color();
+    for (let a = Math.floor((cx - R1) / C); a <= Math.floor((cx + R1) / C); a++) {
+      for (let b = Math.floor((cz - R1) / C); b <= Math.floor((cz + R1) / C); b++) {
+        const h0 = hashU(a, b, 4242), h1 = hashU(a, b, 4343);
+        if (h0 % 10 < 2) continue;
+        const w = 160 + (h1 % 360), d = 160 + ((h1 >>> 9) % 360);
+        const x = a * C + (h0 % 400) - 200, z = b * C + ((h0 >>> 9) % 400) - 200;
+        const dist = Math.hypot(x - cx, z - cz);
+        if (dist < R0 || dist > R1) continue;
+        const k = ((h0 >>> 3) % 1000) / 1000;
+        const ht = 1200 + k * k * 6500 + (h1 % 7 === 0 ? 3000 : 0);
+        const t = (dist - R0) / (R1 - R0);
+        c.copy(near).lerp(haze, t * 0.7).multiplyScalar(1 - 0.55 * t);
+        const u = (h1 % 64) / 64, win = [u, 0, 1 / 40 / 64, 1 / 60 / 64];
+        g.box(x - w / 2, 0, z - d / 2, x + w / 2, ht, z + d / 2, c, col('#0a0810'), win);
+        // ступенчатая верхушка и огни
+        const stepped = h1 % 3 === 0;
+        if (stepped) g.box(x - w * 0.3, ht, z - d * 0.3, x + w * 0.3, ht * 1.08, z + d * 0.3, c, col('#0a0810'), win);
+        gl.cube(x, ht * (stepped ? 1.08 : 1) + 8, z, 18, glowCol('red', 2.4));
+        if (h0 % 4 === 0) {
+          const nc = glowCol(['pink', 'cyan', 'purple', 'blue'][h1 % 4], 1.1);
+          for (let y = 300 + (h0 % 300); y < ht - 100; y += 500 + (h1 % 400)) gl.box(x - w / 2 - 2, y, z - d / 2 - 2, x + w / 2 + 2, y + 8, z + d / 2 + 2, nc, nc);
+        }
+      }
+    }
+    skyline = new THREE.Group();
+    skyline.add(new THREE.Mesh(g.build(), skyMat));
+    if (!gl.empty()) skyline.add(new THREE.Mesh(gl.build(), skyGlowMat));
+    scene.add(skyline);
+  }
+
+  // ---------------------------------------------------------------- летающие машины
+  // Воздушные коридоры над улицами на нескольких высотах
+  const FLY = 90;
+  const flyBody = new THREE.InstancedMesh(unitBox, new THREE.MeshLambertMaterial({ color: 0x22202c, emissive: 0x0c0818 }), FLY);
+  const flyLight = new THREE.InstancedMesh(unitBox, new THREE.MeshBasicMaterial({ toneMapped: false }), FLY * 3);
+  for (const m of [flyBody, flyLight]) { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.frustumCulled = false; scene.add(m); }
+  const FLY_COL = ['pink', 'cyan', 'red', 'purple', 'white'].map((n) => glowCol(n, 3));
+  const flyHead = glowCol('white', 3.5);
+  const flyers = [];
+  const flyS = new THREE.Vector3();
+  function spawnFlyer(f, px, pz, edge) {
+    f.vert = Math.random() < 0.5;
+    const off = Math.round((Math.random() - 0.5) * 7);
+    f.c = (f.vert ? W.roadX(W.colAt(px) + off) : W.roadY(W.rowAt(pz) + off)) + (Math.random() - 0.5) * 50;
+    f.v = (Math.random() < 0.5 ? -1 : 1) * (450 + Math.random() * 800);
+    const along = f.vert ? pz : px;
+    f.t = edge ? along - Math.sign(f.v) * (2600 + Math.random() * 400) : along + (Math.random() - 0.5) * 5000;
+    f.z = [180, 320, 520, 800, 1150][(Math.random() * 5) | 0] + (Math.random() - 0.5) * 40;
+    f.col = FLY_COL[(Math.random() * FLY_COL.length) | 0];
+    f.L = 34 + Math.random() * 20;
+  }
+  function syncFlyers(st, px, pz) {
+    const dt = st.dt || 0;
+    while (flyers.length < FLY) { const f = {}; spawnFlyer(f, px, pz, false); flyers.push(f); }
+    flyers.forEach((f, k) => {
+      f.t += f.v * dt;
+      const along = f.vert ? pz : px, cross = f.vert ? px : pz;
+      if (Math.abs(f.t - along) > 3200 || Math.abs(f.c - cross) > 3200) spawnFlyer(f, px, pz, true);
+      const x = f.vert ? f.c : f.t, z = f.vert ? f.t : f.c;
+      const a = f.vert ? (f.v > 0 ? Math.PI / 2 : -Math.PI / 2) : (f.v > 0 ? 0 : Math.PI);
+      const fx = Math.cos(a), fz = Math.sin(a);
+      const y = f.z + Math.sin(st.time * 1.3 + k) * 3;
+      tmpE.set(0, -a, 0); tmpQ.setFromEuler(tmpE);
+      const put = (mesh, n, ox, oy, sx, sy, sz, c) => {
+        tmpP.set(x + fx * ox, y + oy, z + fz * ox); flyS.set(sx, sy, sz);
+        tmpM.compose(tmpP, tmpQ, flyS); mesh.setMatrixAt(n, tmpM);
+        if (c) mesh.setColorAt(n, c);
+      };
+      put(flyBody, k, 0, 0, f.L, 9, 18);
+      put(flyLight, k * 3, f.L / 2, 0, 2, 3, 14, flyHead);
+      put(flyLight, k * 3 + 1, -f.L / 2, 0, 2, 3, 16, f.col);
+      put(flyLight, k * 3 + 2, 0, -5.5, f.L * 0.7, 1.2, 12, f.col);
+    });
+    flyBody.count = flyers.length; flyLight.count = flyers.length * 3;
+    flyBody.instanceMatrix.needsUpdate = flyLight.instanceMatrix.needsUpdate = true;
+    if (flyLight.instanceColor) flyLight.instanceColor.needsUpdate = true;
+  }
+
+  // ---------------------------------------------------------------- штабы банд
+  // Столб света до неба и голограмма с названием видны сквозь дымку; реакторы пульсируют цветом банды
+  const hqVis = new Map();
+  function gangTex(text, color) {
+    const c = canvas(512, 128), g = c.getContext('2d');
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.font = 'bold 54px "Trebuchet MS", sans-serif';
+    g.shadowColor = color; g.shadowBlur = 22;
+    g.fillStyle = color; g.fillText(text.toUpperCase(), 256, 60);
+    g.shadowBlur = 6; g.fillStyle = '#ffffff'; g.fillText(text.toUpperCase(), 256, 60);
+    g.strokeStyle = color; g.lineWidth = 4; g.shadowBlur = 16; g.strokeRect(8, 8, 496, 112);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  }
+  const pylonCore = new THREE.CylinderGeometry(5, 5, 46, 10);
+  function buildHQ(h) {
+    const add = { transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false };
+    const c = new THREE.Color(h.col);
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(34, 34, 4000, 16, 1, true),
+      new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(1.2), opacity: 0.07, fog: false, ...add }));
+    beam.position.set(h.x, 2000, h.y);
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(440, 110), new THREE.MeshBasicMaterial({ map: gangTex(h.name, h.col), opacity: 0.95, fog: false, ...add }));
+    sign.position.set(h.x, 460, h.y);
+    scene.add(beam, sign);
+    const coreMat = new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(2.6), toneMapped: false });
+    const pyl = h.pylons.map((p) => {
+      const g = new THREE.Group();
+      g.position.set(p.x, 0, p.y);
+      const base = part(g, lambert('#1a1824'), 0, 4, 0, 18, 8, 18);
+      const core = new THREE.Mesh(pylonCore, coreMat); core.position.y = 31; g.add(core);
+      const cap = part(g, lambert('#2a2834'), 0, 56, 0, 14, 4, 14);
+      const ring = part(g, glowMat('white', 2.2), 0, 9, 0, 19, 1.5, 19);
+      scene.add(g);
+      return { g, core, cap, ring, base };
+    });
+    return { beam, sign, pyl, coreMat };
+  }
+  function syncHQ(st) {
+    const P = st.player;
+    for (const h of st.hqs || []) {
+      let v = hqVis.get(h);
+      const d = Math.hypot(h.x - P.x, h.y - P.y);
+      const show = !h.state.dead && (h.state.intel >= 3 || d < 1600);
+      if (!v) { if (!show && d > 2600) continue; v = buildHQ(h); hqVis.set(h, v); }
+      v.sign.visible = show;
+      v.beam.visible = show && d > 900; // вблизи столб не мешает смотреть на реакторы
+      // голограмма поворачивается к камере
+      v.sign.rotation.y = Math.atan2(camera.position.x - h.x, camera.position.z - h.y);
+      v.sign.material.opacity = 0.85 + Math.sin(st.time * 19 + h.k) * 0.08;
+      const near = d < 2600;
+      h.pylons.forEach((p, m) => {
+        const q = v.pyl[m];
+        q.g.visible = near;
+        if (!near) return;
+        q.core.visible = q.ring.visible = q.cap.visible = !p.dead;
+        if (p.dead) { if (Math.random() < st.dt * 4) smoke(p.x, 12, p.y, true); return; }
+        const pulse = 1 + Math.sin(st.time * 6 + m) * 0.12;
+        q.core.scale.set(pulse, 1, pulse);
+      });
+    }
+  }
+
   function syncRain(st) {
     const n = Math.min(MAXR, rain.drops.length);
     for (let k = 0; k < n; k++) {
@@ -1337,7 +1592,7 @@ export function createVoxel(cv) {
     rainLines.visible = n > 0;
   }
 
-  let W0 = 0, H0 = 0;
+  let W0 = 0, H0 = 0, camA = null, camY = 50;
   return {
     resize(w, h) {
       W0 = w; H0 = h;
@@ -1348,13 +1603,25 @@ export function createVoxel(cv) {
       camera.updateProjectionMatrix();
     },
     render(st, first) {
-      const k = Math.min(st.W, st.H) / st.cam.z / 820;
-      const T = { x: st.cam.x, z: st.cam.y, vx: st.player.vx, vy: st.player.vy };
-      const osm = MAP.kind === 'osm';
-      const pending = osm ? manageOSM(T, first ? 60 : 2) : manage(T, first ? 400 : 2);
-      camera.position.set(T.x, 820 * k, T.z + 620 * k);
-      camera.lookAt(T.x, 0, T.z - 60 * k);
-      scene.fog.near = 1500 * k; scene.fog.far = 3400 * k;
+      const P = st.player, dt = st.dt || 0;
+      const T = { x: P.x, z: P.y, vx: P.vx, vy: P.vy };
+      const pending = manage(T, first ? 400 : 3);
+      // камера от третьего лица: позади и чуть выше, плавно догоняет поворот машины
+      const sp = Math.hypot(P.vx, P.vy);
+      if (camA === null || first) camA = P.a;
+      camA += Math.atan2(Math.sin(P.a - camA), Math.cos(P.a - camA)) * Math.min(1, dt * (P.drift ? 2.5 : 4.5));
+      const fx = Math.cos(camA), fz = Math.sin(camA);
+      const back = 130 + sp * 0.09, up = 46 + sp * 0.025, pz = P.z || 0;
+      camY += (pz + up - camY) * Math.min(1, dt * 6);
+      const sh = st.shake || 0;
+      camera.position.set(P.x - fx * back + (Math.random() - 0.5) * sh, Math.max(12, camY) + (Math.random() - 0.5) * sh, P.y - fz * back + (Math.random() - 0.5) * sh);
+      camera.lookAt(P.x + fx * 140, pz + 34, P.y + fz * 140);
+      const fov = 62 + Math.min(1, sp / 580) * 14;
+      if (Math.abs(camera.fov - fov) > 0.1) { camera.fov = fov; camera.updateProjectionMatrix(); }
+      sky.position.copy(camera.position);
+      syncSkyline(P.x, P.y);
+      syncFlyers(st, P.x, P.y);
+      holoMat.opacity = 0.82 + Math.sin(st.time * 23) * 0.04 + (Math.random() < 0.02 ? -0.3 : 0);
       for (const e of blocks.values()) for (const c of e.cranes) c.jib.rotation.y = -(c.c.a0 + st.time * c.c.speed);
       syncCars(st);
       syncPeds(st);
@@ -1363,7 +1630,8 @@ export function createVoxel(cv) {
       syncSkids(st);
       syncMarkers(st);
       syncWorks(st);
-      if (osm) syncSignalsOSM(st, T); else syncSignals(st, T);
+      syncHQ(st);
+      syncSignals(st, T);
       handleFx(st, st.dt);
             composer.render();
       return pending;

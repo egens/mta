@@ -5,6 +5,8 @@ import { clamp } from './util.js';
 import { MAP } from './map.js';
 
 export const MAX_SPEED = 580;
+const BASE_VMAX = 0.68;          // доля MAX_SPEED у машины без тюнинга
+const W_SINK = 24; // глубже — машина в воде
 const GRAVITY = 720;
 const CAR_H = 18;
 
@@ -17,7 +19,7 @@ export function createPlayer(x, y, a) {
 }
 
 export function repairPlayer(P) {
-  P.hp = 100; P.dmg = { front: 0, rear: 0, left: 0, right: 0 }; P.dead = false; P.deadT = 0; P.gen++;
+  P.hp = 100; P.dmg = { front: 0, rear: 0, left: 0, right: 0 }; P.dead = false; P.deadT = 0; P.gen++; P.drowned = false;
   P.z = 0; P.vz = 0; P.air = false;
 }
 
@@ -28,7 +30,7 @@ export function damagePlayer(P, impact, nx, ny, st) {
   const lx = -(nx * fx + ny * fy), ly = -(-nx * fy + ny * fx);
   const zone = Math.abs(lx) > Math.abs(ly) ? (lx > 0 ? 'front' : 'rear') : (ly > 0 ? 'right' : 'left');
   // мягкая кривая: царапины почти бесплатны, лоб в стену на 200 км/ч — около четверти
-  let amount = Math.min(26, Math.pow((impact - 110) / 100, 1.3) * 5);
+  let amount = Math.min(26, Math.pow((impact - 110) / 100, 1.3) * 5) * (P.armor || 1);
   // серия касаний за доли секунды (скрежет о стену, отскок) считается одним ударом
   const now = performance.now();
   if (now - (P.hitAt || 0) < 350) amount *= 0.25;
@@ -54,8 +56,13 @@ export function updatePlayer(P, inp, dt, st) {
     P.x += P.vx * dt; P.y += P.vy * dt;
   } else {
     // повреждения: меньше мощность и максималка, машину уводит в сторону помятого бока
-    const perf = (0.5 + 0.5 * (P.hp / 100)) * (P.power || 1);
-    const vmax = MAX_SPEED * (0.55 + 0.45 * (P.hp / 100)) * (P.power || 1);
+    // стоковая машина заметно медленнее: до прежней максималки её доводит тюнинг двигателя
+    let perf = (0.5 + 0.5 * (P.hp / 100)) * (P.power || 1) * 0.72;
+    let vmax = MAX_SPEED * BASE_VMAX * (0.55 + 0.45 * (P.hp / 100)) * (P.power || 1);
+    // нитро: рывок, пока есть баллон; баллон заправляется сам
+    P.boosting = !!(P.nitro && inp.boost && inp.up && P.nitroT > 0);
+    if (P.boosting) { perf *= 2.2; vmax *= 1.3; P.nitroT -= dt; }
+    else if (P.nitro) P.nitroT = Math.min(3, (P.nitroT || 0) + dt * 0.3);
     if (inp.up) {
       if (vf < -8) { vf += 1000 * dt; P.brake = true; }
       else vf += 430 * perf * (1 - Math.max(0, vf) / vmax) * dt + 20 * dt;
@@ -117,12 +124,19 @@ export function updatePlayer(P, inp, dt, st) {
   const pitchT = P.air ? clamp(Math.atan2(P.vz, spd + 1), -0.5, 0.5) : clamp(Math.atan2(P.vz, spd + 1), -0.4, 0.4);
   P.pitch += (pitchT - P.pitch) * Math.min(1, dt * 10);
 
-  // вода (только у самой поверхности)
-  if (P.z < 2 && inWater(P)) {
+  // пруды в парках — мелкие, от бортика отскакиваем
+  if (P.z < 2 && P.z > -2 && inWater(P)) {
     P.x = px; P.y = py;
     P.vx *= -0.3; P.vy *= -0.3;
     if (st && st.onImpact) st.onImpact(150, P.x, P.y, false);
   }
+  // река ниже уровня улиц: слетели с набережной — машина тонет
+  if (P.z < -W_SINK && !P.dead) {
+    P.hp = 0; P.dead = true; P.deadT = 0; P.drowned = true;
+    P.vx *= 0.2; P.vy *= 0.2;
+    if (st && st.onWreck) st.onWreck(P);
+  }
+  if (P.drowned) { P.vx *= 0.9; P.vy *= 0.9; }
 }
 
 function inWater(c) {
@@ -130,7 +144,7 @@ function inWater(c) {
   const hl = c.L / 2 - 4, hw = c.W / 2 - 3;
   const pts = [[c.x, c.y], [c.x + fx * hl - fy * hw, c.y + fy * hl + fx * hw], [c.x + fx * hl + fy * hw, c.y + fy * hl - fx * hw],
     [c.x - fx * hl - fy * hw, c.y - fy * hl + fx * hw], [c.x - fx * hl + fy * hw, c.y - fy * hl - fx * hw]];
-  for (const [x, y] of pts) if (MAP.impl.isWater(x, y)) return true;
+  for (const [x, y] of pts) if (MAP.impl.isPond(x, y)) return true;
   return false;
 }
 
@@ -201,47 +215,6 @@ function respond(c, h, bounce = 0.35) {
   return 0;
 }
 
-// Машина против многоугольника здания: углы и середины сторон машины, попавшие внутрь,
-// выталкиваются через ближайшее ребро; вершины здания внутри машины — по оси машины.
-function pointInPoly(pts, x, y) {
-  let inside = false;
-  for (let i = 0, j = pts.length - 2; i < pts.length; j = i, i += 2) {
-    const xi = pts[i], yi = pts[i + 1], xj = pts[j], yj = pts[j + 1];
-    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-function obbPoly(c, pg) {
-  const fx = Math.cos(c.a), fy = Math.sin(c.a), rx = -fy, ry = fx;
-  const hl = c.L / 2, hw = c.W / 2;
-  let best = null;
-  const pts = pg.pts;
-  for (const [u, v] of [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    const px = c.x + fx * hl * u + rx * hw * v, py = c.y + fy * hl * u + ry * hw * v;
-    if (!pointInPoly(pts, px, py)) continue;
-    // ближайшее ребро
-    let bd = Infinity, bnx = 0, bny = 0;
-    for (let i = 0, j = pts.length - 2, e = pg.normals.length - 2; i < pts.length; j = i, i += 2) {
-      const ax = pts[j], ay = pts[j + 1], bx = pts[i], by = pts[i + 1];
-      const ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey || 1;
-      const t = Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / l2));
-      const d = Math.hypot(px - ax - ex * t, py - ay - ey * t);
-      if (d < bd) { bd = d; const k = i / 2; bnx = pg.normals[k * 2]; bny = pg.normals[k * 2 + 1]; }
-    }
-    if (!best || bd > best.d) best = { nx: bnx, ny: bny, d: bd + 0.5 };
-  }
-  if (best) return best;
-  // острый угол здания вошёл в бок машины
-  for (let i = 0; i < pts.length; i += 2) {
-    const dx = pts[i] - c.x, dy = pts[i + 1] - c.y;
-    const lx = dx * fx + dy * fy, ly = dx * rx + dy * ry;
-    if (Math.abs(lx) >= hl || Math.abs(ly) >= hw) continue;
-    const ox = hl - Math.abs(lx), oy = hw - Math.abs(ly);
-    return ox < oy ? { nx: -fx * Math.sign(lx), ny: -fy * Math.sign(lx), d: ox + 0.5 } : { nx: -rx * Math.sign(ly), ny: -ry * Math.sign(ly), d: oy + 0.5 };
-  }
-  return null;
-}
-
 // препятствие по высоте: машина [z, z+CAR_H] пересекается с [z0, z1]
 const zHit = (c, z0 = 0, z1 = Infinity) => (c.z || 0) < z1 - 2 && (c.z || 0) + CAR_H > z0;
 
@@ -253,12 +226,6 @@ export function collideStatic(c, st, isPlayer) {
   const groups = MAP.impl.collidersNear(c.x - r, c.y - r, c.x + r, c.y + r, []);
   for (let pass = 0; pass < 2; pass++) {
     for (const B of groups) {
-      // многоугольники зданий (карта Москвы)
-      if (B.polys) for (const pg of B.polys) {
-        if (!near(pg) || !zHit(c, 0, pg.z1)) continue;
-        const h = obbPoly(c, pg);
-        if (h) { const im = respond(c, h); if (im > impact) { impact = im; ix = c.x - h.nx * c.W / 2; iy = c.y - h.ny * c.W / 2; inx = h.nx; iny = h.ny; } }
-      }
       if (B.circles) for (const ci of B.circles) {
         if (Math.abs(ci.x - c.x) > r + ci.r || Math.abs(ci.y - c.y) > r + ci.r || !zHit(c, 0, ci.z1)) continue;
         const h = obbCircle(c, ci);

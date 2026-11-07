@@ -6,7 +6,7 @@ import { obbObb, collideStatic } from './car.js';
 import { worksSteer } from './roadworks.js';
 
 const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];
-const MAX_CARS = 34;
+const MAX_CARS = 80;
 const MAX_PEDS = 46;
 
 // светофор: 0 — зелёный по горизонтали, 1 — жёлтый гориз., 2 — зелёный по вертикали, 3 — жёлтый верт.
@@ -25,9 +25,10 @@ function edgeExists(i, j, d) {
 const horiz = (d) => d === 0 || d === 2;
 const nodePos = (i, j) => [W.roadX(i), W.roadY(j)];
 
+const aveOf = (i, j, d) => (horiz(d) ? W.aveY(j) : W.aveX(i));
 function laneOffset(i, j, d, lane) {
-  const ave = horiz(d) ? W.aveY(j) : W.aveX(i);
-  return ave ? 6 + 32 * (lane + 0.5) : 21;
+  const ave = aveOf(i, j, d);
+  return W.laneOff(ave, Math.min(lane, W.laneCount(ave) - 1));
 }
 // полуширина поперечной дороги в узле для направления d
 const crossHalf = (i, j, d) => (horiz(d) ? W.widthX(i) / 2 : W.widthY(j) / 2);
@@ -63,7 +64,9 @@ function chooseNext(c) {
 function makeTurn(c, d2) {
   const { ni, nj, d } = c;
   const [bx, by] = nodePos(ni, nj);
-  const lane2 = W.aveY(nj) || W.aveX(ni) ? (d2 === ((d + 1) & 3) ? 1 : d2 === ((d + 3) & 3) ? 0 : c.lane) : 0;
+  // направо — в крайнюю правую полосу, налево — в левую, прямо — в свою
+  const n2 = W.laneCount(aveOf(ni, nj, d2));
+  const lane2 = d2 === ((d + 1) & 3) ? n2 - 1 : d2 === ((d + 3) & 3) ? 0 : Math.min(c.lane, n2 - 1);
   const o2 = laneOffset(ni, nj, d2, lane2);
   const r2x = -DY[d2], r2y = DX[d2];
   const p0x = c.seg.ex, p0y = c.seg.ey;
@@ -83,7 +86,7 @@ function pickSprite(c) {
   const pick = (a) => a[(Math.random() * a.length) | 0];
   if (r < 0.06) { c.kind = 'truck'; c.color = pick(['#9aa0a8', '#c84a2a', '#2a5aa8', '#e0e0e0']); c.heavy = true; c.cruise *= 0.8; }
   else if (r < 0.15) { c.kind = 'bus'; c.color = pick(BUS_COLORS); c.heavy = true; c.cruise *= 0.75; c.stopIn = 6 + Math.random() * 14; }
-  else if (r < 0.2) { c.kind = pick(['dump', 'dump', 'mixer', 'roller']); c.color = pick(WORK_COLORS); c.heavy = true; c.cruise *= c.kind === 'roller' ? 0.5 : 0.72; }
+  else if (r < 0.2) { c.kind = pick(['dump', 'dump', 'mixer', 'roller']); c.color = pick(WORK_COLORS); c.heavy = true; c.cruise *= c.kind === 'roller' ? 0.75 : 0.85; }
   else if (r < 0.38) { c.kind = 'taxi'; c.color = '#e8b81c'; }
   else if (r < 0.41) { c.kind = 'police'; c.color = '#e8e8ee'; c.police = true; }
   else { c.kind = pick(['sedan', 'sedan', 'sedan', 'hatch', 'van']); c.color = pick(CAR_COLORS); }
@@ -91,22 +94,70 @@ function pickSprite(c) {
 }
 
 function spawnCar(st) {
-  const { cam } = st;
-  const minR = st.viewR + 120, maxR = st.viewR + 900;
+  const { cam, player: P } = st;
+  // ближе всего машины появляются за спиной и сбоку, впереди — только за туманом
+  const minR = 700, maxR = st.viewR + 700;
   const ang = Math.random() * Math.PI * 2, dist = minR + Math.random() * (maxR - minR);
+  if (dist < st.viewR && Math.cos(ang - P.a) > 0.2) return;
   const px = cam.x + Math.cos(ang) * dist, py = cam.y + Math.sin(ang) * dist;
   const i = W.colAt(px), j = W.rowAt(py);
   const d = (Math.random() * 4) | 0;
   if (!edgeExists(i, j, d)) return;
-  const c = { x: 0, y: 0, a: 0, speed: 0, cruise: 150 + Math.random() * 110, lane: Math.random() < 0.5 ? 0 : 1, mode: 'drive', vx: 0, vy: 0, av: 0, brake: false };
+  const c = { x: 0, y: 0, a: 0, speed: 0, cruise: 150 + Math.random() * 110, lane: (Math.random() * W.laneCount(aveOf(i, j, d))) | 0, mode: 'drive', vx: 0, vy: 0, av: 0, brake: false };
   pickSprite(c);
   makeStraight(c, i, j, d);
   c.seg.s = c.seg.len * (0.1 + Math.random() * 0.7);
   placeOnSeg(c);
   for (const o of st.traffic) if (Math.abs(o.x - c.x) < 80 && Math.abs(o.y - c.y) < 80) return;
-  if (Math.hypot(c.x - st.player.x, c.y - st.player.y) < st.viewR) return;
+  if (Math.hypot(c.x - P.x, c.y - P.y) < minR) return;
   c.speed = c.cruise * 0.8;
   st.traffic.push(c);
+}
+
+// Пробка: впереди по ходу игрока на улице встаёт сломанная машина, за ней копится очередь
+// во всех полосах этого направления. Через полминуты-минуту её убирают, и поток трогается.
+function spawnJam(st) {
+  const P = st.player;
+  for (let tries = 0; tries < 10; tries++) {
+    const a = P.a + (Math.random() - 0.5) * 1.6, d = 900 + Math.random() * 900;
+    const i = W.colAt(P.x + Math.cos(a) * d), j = W.rowAt(P.y + Math.sin(a) * d);
+    const dir = (Math.random() * 4) | 0;
+    if (!edgeExists(i, j, dir)) continue;
+    const ave = aveOf(i, j, dir), n = W.laneCount(ave);
+    const lanes = [];
+    for (let l = 0; l < n; l++) {
+      const c = { lane: l };
+      makeStraight(c, i, j, dir);
+      if (c.seg.len < 420) break;
+      lanes.push(c.seg);
+    }
+    if (lanes.length < n) continue;
+    const g0 = lanes[0];
+    const mx = (g0.sx + g0.ex) / 2, my = (g0.sy + g0.ey) / 2;
+    if (W.isWater(mx, my) || Math.hypot(mx - P.x, my - P.y) < 700) continue;
+    const jam = { t: 30 + Math.random() * 30 };
+    // виновник: заглохшая машина с аварийкой ближе к концу отрезка; её объезжают только по встречке
+    const bl = n === 3 ? 1 : (Math.random() * n) | 0;
+    const blk = { x: 0, y: 0, a: 0, speed: 0, cruise: 0, lane: bl, mode: 'hit', vx: 0, vy: 0, av: 0, hitT: 0, brake: true, jam, hazard: true };
+    pickSprite(blk); if (blk.heavy || blk.police) { blk.kind = 'sedan'; blk.heavy = blk.police = false; [blk.L, blk.W] = CAR_DIM.sedan; }
+    makeStraight(blk, i, j, dir);
+    blk.seg.s = blk.seg.len * 0.8; placeOnSeg(blk);
+    blk.a += (Math.random() - 0.5) * 0.5;
+    st.traffic.push(blk);
+    for (let l = 0; l < n; l++) {
+      const len = lanes[l].len;
+      for (let s = len * 0.8 - 62; s > 30; s -= 58 + Math.random() * 10) {
+        const c = { x: 0, y: 0, a: 0, speed: 0, cruise: 150 + Math.random() * 110, lane: l, mode: 'drive', vx: 0, vy: 0, av: 0, brake: true };
+        pickSprite(c);
+        makeStraight(c, i, j, dir);
+        c.seg.s = s; placeOnSeg(c);
+        if (st.traffic.some((o) => Math.abs(o.x - c.x) < 50 && Math.abs(o.y - c.y) < 50)) continue;
+        st.traffic.push(c);
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 function placeOnSeg(c) {
@@ -142,9 +193,11 @@ function mustStop(c, time) {
 
 export function updateTraffic(st, dt) {
   const { player: P, time } = st;
-  if (st.traffic.length < MAX_CARS) for (let k = 0; k < 3; k++) spawnCar(st);
+  if (st.traffic.length < MAX_CARS) for (let k = 0; k < 4; k++) spawnCar(st);
+  st.jamT = (st.jamT ?? 25) - dt;
+  if (st.jamT <= 0) st.jamT = spawnJam(st) ? 50 + Math.random() * 50 : 5;
   const far = st.viewR + 1400;
-  st.traffic = st.traffic.filter((c) => Math.abs(c.x - P.x) < far && Math.abs(c.y - P.y) < far);
+  st.traffic = st.traffic.filter((c) => Math.abs(c.x - P.x) < far && Math.abs(c.y - P.y) < far && !(c.jam && (c.jam.t -= dt) < 0 && Math.hypot(c.x - P.x, c.y - P.y) > 500));
 
   for (const c of st.traffic) {
     if (c.mode !== 'drive') {
@@ -175,7 +228,7 @@ export function updateTraffic(st, dt) {
       const along = rx * fx + ry * fy;
       if (along <= 0 || along > 150) return;
       const lat = Math.abs(-rx * fy + ry * fx);
-      if (lat > (any ? 26 : 16)) return;
+      if (lat > (any ? (o.jam ? 64 : 26) : 16)) return;
       if (!any && o.mode === 'drive' && Math.cos(o.a - c.a) < 0.3) return;
       const gap = along - (c.L + (o.L || 46)) / 2 - 10;
       target = Math.min(target, Math.max(0, gap) * 2.2);

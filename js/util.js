@@ -1,6 +1,11 @@
 // Детерминированные хэши, ГПСЧ, шум и мелкая математика.
 
-export const SEED = 0x5eed1234;
+// Сид города: у каждого забега свой (run.js кладёт его в localStorage и перезагружает страницу)
+function runSeed() {
+  try { const r = JSON.parse(localStorage.getItem('mta-run')); if (r && r.seed) return r.seed >>> 0; } catch (e) { /* первый забег */ }
+  return 0x5eed1234;
+}
+export const SEED = runSeed();
 
 export function hashU(a, b = 0, c = 0) {
   let h = SEED ^ Math.imul(a | 0, 0x27d4eb2d);

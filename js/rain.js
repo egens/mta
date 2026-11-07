@@ -9,7 +9,7 @@ export const rain = {
 
 const MAX_DROPS = 900;
 const FALL = 1500;     // скорость падения, ед/с
-const TOP = 900;       // высота появления
+const TOP = 420;       // высота появления
 const WIND = 120;
 
 function spawn(d, cam, R, anyHeight) {
@@ -21,7 +21,7 @@ function spawn(d, cam, R, anyHeight) {
 
 export function updateRain(st, dt) {
   rain.k += ((rain.on ? 1 : 0) - rain.k) * Math.min(1, dt * 0.8);
-  const R = { x: (st.W / 2 / st.cam.z) * 1.25, y: (st.H / 2 / st.cam.z) * 1.25 };
+  const R = { x: 650, y: 650 }; // вокруг машины — камера всегда рядом
   const want = Math.round(MAX_DROPS * rain.k);
   while (rain.drops.length < want) { const d = {}; spawn(d, st.cam, R, true); rain.drops.push(d); }
   if (rain.drops.length > want) rain.drops.length = want;
