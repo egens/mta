@@ -1,13 +1,12 @@
 // Мастерские «Неон-тюн»: куда тратить деньги. Ремонт, двигатель, броня, нитро, покраска
-// и «отмывка» розыска. Мастерские стоят у обочины отдельных кварталов (белые столбы света);
-// заехать в круг на малой скорости — открывается меню, игра на паузе. Улучшения хранятся в браузере.
+// и «отмывка» розыска. Мастерские — неоновые боксы в кварталах с заездной площадкой с улицы;
+// заехать на площадку на малой скорости — открывается меню, игра на паузе. Улучшения хранятся в браузере.
 import * as W from './world.js';
-import { hash } from './util.js';
 import { repairPlayer } from './car.js';
 import { stars, clearHeat } from './police.js';
 
 const KEY = 'mta-garage';
-const ENGINE = [0, 1500, 4000, 9000];      // цена уровня; мощность +12% за уровень
+const ENGINE = [0, 1500, 4000, 9000];      // цена уровня; мощность +16% за уровень
 const ARMOR = [0, 1200, 3500, 8000];       // урон ×0.8 / 0.62 / 0.45
 const ARMOR_K = [1, 0.8, 0.62, 0.45];
 const NITRO_PRICE = 5000;
@@ -19,22 +18,20 @@ const COL = '#f0f0ff';
 function load() { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { return {}; } }
 function save(d) { try { localStorage.setItem(KEY, JSON.stringify(d)); } catch (e) { /* без сохранений */ } }
 
-// мастерская на правой кромке улицы-колонки i посреди квартала между строками j и j+1
+// мастерская стоит в квартале (i, j): точка заезда — площадка перед воротами
 function garageAt(i, j) {
-  if (hash(i, j, 505) > 0.08 || !W.vSegExists(i, j)) return null;
-  const x = W.roadX(i) + W.widthX(i) / 2 - 16, y = (W.roadY(j) + W.roadY(j + 1)) / 2;
-  if (W.riverDist(x, y) < 150 || W.diagsInRect(x - 120, y - 120, x + 120, y + 120, 60).length) return null;
-  return { x, y, i, j };
+  const T = W.getBlock(i, j).tune;
+  return T ? { x: T.x, y: T.y, i, j, T } : null;
 }
 
 export function createShop(st, ui) {
-  const up = Object.assign({ engine: 0, armor: 0, nitro: false, paint: 0 }, load());
+  const up = Object.assign({ engine: 0, armor: 0, nitro: false, paint: 4 }, load());
   let open = false, inside = null, sel = 0;
   const el = document.getElementById('shop');
 
   function apply() {
     const P = st.player;
-    P.power = 1 + 0.12 * up.engine;
+    P.power = 1 + 0.16 * up.engine;
     P.armor = ARMOR_K[up.armor];
     P.nitro = up.nitro;
     if (P.nitroT === undefined) P.nitroT = 3;
@@ -48,7 +45,7 @@ export function createShop(st, ui) {
     const list = [
       { name: 'Ремонт', about: P.hp >= 100 ? 'машина цела' : `восстановить ${Math.round(100 - P.hp)}% корпуса`, price: fix, off: fix <= 0,
         buy() { repairPlayer(P); apply(); } },
-      { name: `Двигатель ${up.engine < 3 ? up.engine + 1 : 3}/3`, about: up.engine < 3 ? `+12% мощности и максималки` : 'максимальный уровень',
+      { name: `Двигатель ${up.engine < 3 ? up.engine + 1 : 3}/3`, about: up.engine < 3 ? `+16% мощности и максималки` : 'максимальный уровень',
         price: ENGINE[up.engine + 1] || 0, off: up.engine >= 3, buy() { up.engine++; } },
       { name: `Броня ${up.armor < 3 ? up.armor + 1 : 3}/3`, about: up.armor < 3 ? `урон от ударов ×${ARMOR_K[up.armor + 1]}` : 'максимальный уровень',
         price: ARMOR[up.armor + 1] || 0, off: up.armor >= 3, buy() { up.armor++; } },
@@ -114,7 +111,7 @@ export function createShop(st, ui) {
       const near = this.nearest(120);
       if (inside && (!near || near.i !== inside.i || near.j !== inside.j)) inside = null;
       if (open || inside || !near || P.dead) return;
-      if (Math.hypot(near.x - P.x, near.y - P.y) < 75 && Math.hypot(P.vx, P.vy) < 110) {
+      if (Math.hypot(near.x - P.x, near.y - P.y) < 55 && Math.hypot(P.vx, P.vy) < 110) {
         inside = near; open = true; sel = P.hp < 100 ? 0 : 1;
         P.vx = P.vy = 0;
         el.classList.remove('hidden');
@@ -133,7 +130,7 @@ export function createShop(st, ui) {
     nearest(R) {
       const P = st.player;
       let best = null, bd = R;
-      for (let i = W.colAt(P.x - R) - 1; i <= W.colAt(P.x + R) + 1; i++) for (let j = W.rowAt(P.y - R) - 1; j <= W.rowAt(P.y + R); j++) {
+      for (let i = W.colAt(P.x - R) - 1; i <= W.colAt(P.x + R); i++) for (let j = W.rowAt(P.y - R) - 1; j <= W.rowAt(P.y + R); j++) {
         const g = garageAt(i, j);
         if (!g) continue;
         const d = Math.hypot(g.x - P.x, g.y - P.y);
@@ -144,9 +141,9 @@ export function createShop(st, ui) {
     // маркеры мастерских вокруг для 3D и мини-карты
     markers() {
       const P = st.player, out = [], R = 2600;
-      for (let i = W.colAt(P.x - R); i <= W.colAt(P.x + R) + 1; i++) for (let j = W.rowAt(P.y - R); j <= W.rowAt(P.y + R); j++) {
+      for (let i = W.colAt(P.x - R) - 1; i <= W.colAt(P.x + R); i++) for (let j = W.rowAt(P.y - R) - 1; j <= W.rowAt(P.y + R); j++) {
         const g = garageAt(i, j);
-        if (g) out.push({ kind: 'shop', x: g.x, y: g.y, r: 75, col: COL, k: 1.6 });
+        if (g) out.push({ kind: 'shop', x: g.x, y: g.y, r: 60, col: COL, k: 0.9 });
       }
       return out;
     },

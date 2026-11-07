@@ -64,6 +64,6 @@ export const CAR_COLORS = ['#b8322b', '#2b5cb8', '#dcdcdc', '#25272b', '#7a7f86'
 // автобусы: белый с полосой, зелёный, жёлтый; спецтехника — оранжевая и жёлтая
 export const BUS_COLORS = ['#e4e6e8', '#e4e6e8', '#3a9a5a', '#e0b828'];
 export const WORK_COLORS = ['#e8781c', '#e8a81c', '#d8c020'];
-export const CAR_DIM = { sedan: [46, 22], hatch: [40, 21], van: [52, 24], taxi: [46, 22], police: [48, 22], truck: [84, 26], bus: [104, 28], sport: [48, 23],
+export const CAR_DIM = { sedan: [46, 22], hatch: [40, 21], van: [52, 24], taxi: [46, 22], police: [48, 22], truck: [84, 26], bus: [104, 28], sport: [48, 23], delorean: [48, 23],
   dump: [70, 26], mixer: [72, 26], roller: [44, 26], excavator: [54, 26] };
 

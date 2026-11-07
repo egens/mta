@@ -178,7 +178,7 @@ let coneTex = null;
 function carModel(kind, color, isPlayer = false) {
   const [L, Wd] = CAR_DIM[kind] || CAR_DIM.sedan;
   const g = new THREE.Group();
-  const body = isPlayer ? new THREE.MeshLambertMaterial({ color }) : lambert(color);
+  const body = isPlayer ? new THREE.MeshPhongMaterial({ color, specular: 0x8a8f98, shininess: 70 }) : lambert(color);
   const dark = lambert('#14181e');
   const tall = kind === 'bus' || kind === 'truck' || kind === 'dump' || kind === 'mixer';
   const P = {};
@@ -228,6 +228,28 @@ function carModel(kind, color, isPlayer = false) {
     for (const sd of [-1, 1]) part(g, dark, -L * 0.15, 26, sd * (Wd / 2 - 2), 1.5, 12, 1.5);
     part(g, body, -L * 0.15, 32, 0, L * 0.4, 1.5, Wd - 2);
     g.userData.beacon = [part(g, glowMat('orange', 3), -L * 0.15, 34, 0, 4, 3, 4)];
+  } else if (kind === 'delorean') {
+    // клиновидное купе из нержавейки: низкий острый нос, плоская крыша с «крыльями чайки»,
+    // жалюзи на заднем стекле, чёрный молдинг по бокам и неоновая подсветка днища
+    const seg = L / 3, steel = body;
+    const blk = lambert('#101114'), glass = lambert('#0b0f16');
+    P.mid = part(g, steel, 0, 8, 0, seg + 0.2, 7, Wd);
+    P.front = part(g, steel, seg, 7, 0, seg, 5, Wd - 0.4); P.front.rotation.z = -0.1;
+    P.rear = part(g, steel, -seg, 8.5, 0, seg, 7, Wd);
+    part(g, blk, 0, 4.8, 0, L - 1, 2, Wd + 0.3);                          // чёрный низ кузова
+    for (const sd of [-1, 1]) {
+      part(g, blk, 0, 8.2, sd * (Wd / 2 + 0.15), L - 4, 1.4, 0.4);         // молдинг
+      part(g, blk, -2, 17.1, sd * (Wd / 2 - 4.2), L * 0.3, 0.5, 0.5);     // шов двери-крыла
+    }
+    P.cabin = part(g, glass, -2, 14.2, 0, L * 0.34, 5.4, Wd - 3);
+    const ws = part(g, glass, L * 0.17, 13.4, 0, 8.5, 0.8, Wd - 3.4); ws.rotation.z = -0.62;   // лобовое
+    P.roof = part(g, steel, -2.5, 17.2, 0, L * 0.27, 1.2, Wd - 5);
+    for (let k = 0; k < 5; k++) {                                          // жалюзи
+      const sl = part(g, blk, -L * 0.2 - k * 1.9, 15.6 - k * 0.95, 0, 1, 0.7, Wd - 5); sl.rotation.z = 0.5;
+    }
+    part(g, blk, -L / 2 - 0.2, 8.5, 0, 0.5, 4, Wd - 9);                     // задняя решётка
+    part(g, blk, L / 2 + 0.1, 6.2, 0, 0.5, 2.4, Wd - 2);                    // бампер-решётка
+    part(g, glowMat('cyan', 0.55), 0, 0.5, 0, L * 0.7, 0.3, Wd * 0.7);      // подсветка днища
   } else {
     const seg = L / 3;
     P.rear = part(g, body, -seg, 8, 0, seg, 9, Wd);
@@ -241,8 +263,13 @@ function carModel(kind, color, isPlayer = false) {
     if (isPlayer) { P.stripeA = part(g, lambert('#f2f2f2'), 0, 12.6, -3, L - 2, 0.6, 2); P.stripeB = part(g, lambert('#f2f2f2'), 0, 12.6, 3, L - 2, 0.6, 2); }
   }
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) part(g, lambert('#0a0a0c'), sx * L * 0.32, 4, sz * (Wd / 2), 9, 8, 3);
-  g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
-  g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+  if (kind === 'delorean') {
+    g.userData.heads = [-1, 1].map((sd) => part(g, glowMat('white', 2.5), L / 2 + 0.3, 8.4, sd * (Wd / 2 - 4.5), 1, 2.2, 6.5));
+    g.userData.tail = [-1, 1].map((sd) => part(g, glowMat('red', 1), -L / 2 - 0.3, 9.5, sd * (Wd / 2 - 3.2), 1, 3, 6));
+  } else {
+    g.userData.heads = [part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('white', 2.5), L / 2 + 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+    g.userData.tail = [part(g, glowMat('red', 1), -L / 2 - 0.3, 8, -Wd / 2 + 4, 1, 3, 4), part(g, glowMat('red', 1), -L / 2 - 0.3, 8, Wd / 2 - 4, 1, 3, 4)];
+  }
   if (!coneTex) { coneTex = new THREE.CanvasTexture(S.coneGlow); coneTex.colorSpace = THREE.SRGBColorSpace; }
   // по лучу от каждой фары
   const len = isPlayer ? 290 : 180;
@@ -264,7 +291,7 @@ function carModel(kind, color, isPlayer = false) {
   g.userData.L = L; g.userData.W = Wd;
   // исходные положения частей для модели повреждений
   g.userData.base = new Map();
-  g.traverse((o) => { if (o !== g) g.userData.base.set(o, { p: o.position.clone(), s: o.scale.clone() }); });
+  g.traverse((o) => { if (o !== g) g.userData.base.set(o, { p: o.position.clone(), s: o.scale.clone(), r: o.rotation.clone() }); });
   return g;
 }
 
@@ -314,15 +341,15 @@ const scorch = new THREE.Color('#161414');
 function applyDamage(m, P) {
   const { parts: Q, base, L, W: Wd } = m.userData;
   const d = P.dmg;
-  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.set(m.userData.isCone.has(o) ? -Math.PI / 2 : 0, 0, 0); }
+  for (const [o, b] of base) { o.position.copy(b.p); o.scale.copy(b.s); o.rotation.copy(b.r); }
   const seg = L / 3;
   if (Q.front) {
     const k = d.front * 0.5;
-    Q.front.scale.x *= 1 - k; Q.front.position.x -= (seg * k) / 2; Q.front.rotation.z = -0.25 * d.front; Q.front.position.y += 1.5 * d.front;
+    Q.front.scale.x *= 1 - k; Q.front.position.x -= (seg * k) / 2; Q.front.rotation.z += -0.25 * d.front; Q.front.position.y += 1.5 * d.front;
   }
   if (Q.rear) {
     const k = d.rear * 0.45;
-    Q.rear.scale.x *= 1 - k; Q.rear.position.x += (seg * k) / 2; Q.rear.rotation.z = 0.2 * d.rear;
+    Q.rear.scale.x *= 1 - k; Q.rear.position.x += (seg * k) / 2; Q.rear.rotation.z += 0.2 * d.rear;
   }
   if (Q.mid) {
     const side = d.left - d.right;
@@ -1011,8 +1038,29 @@ export function createVoxel(cv) {
       glow.box(x0, h + 2, z0, x1, h + 4, z0 + 1.5, c, c, null, true); glow.box(x0, h + 2, z1 - 1.5, x1, h + 4, z1, c, c, null, true);
       glow.box(x0, h + 2, z0, x0 + 1.5, h + 4, z1, c, c, null, true); glow.box(x1 - 1.5, h + 2, z0, x1, h + 4, z1, c, c, null, true);
     }
+    if (b.tune) tuneDress(b, solid, glow);
     if (b.style === 'canopy') glow.box(x0 + 4, h - 2, z0 + 4, x1 - 4, h - 1, z1 - 4, glowCol('white', 1.6), glowCol('white', 1.6), null, true);
     if (h > 150) neonDress(b, solid, glow, bill);
+  }
+
+  // Мастерская «Неон-тюн»: тёмные ворота в неоновой раме, светящийся козырёк и полоса по крыше
+  function tuneDress(b, solid, glow) {
+    const T = b.tune, D = T.door, h = b.height;
+    const pink = glowCol('pink', 2), cyan = glowCol('cyan', 1.6), dim = glowCol('purple', 0.9);
+    // локальные координаты: u — от фасада наружу к улице, v — вдоль ворот от их края
+    const fx = D.x + D.w / 2, fz = D.y + D.h / 2, along = T.nx ? D.h : D.w;
+    const at = (u, v) => (T.nx ? [fx - T.nx * u, D.y + v] : [D.x + v, fz - T.ny * u]);
+    const R = (u0, u1, v0, v1, y0, y1, c, g) => {
+      const [x0, z0] = at(u0, v0), [x1, z1] = at(u1, v1);
+      (g || glow).box(Math.min(x0, x1), y0, Math.min(z0, z1), Math.max(x0, x1), y1, Math.max(z0, z1), c, c, null, true);
+    };
+    R(-0.5, 1.5, 0, along, 0, 30, col('#07060a'), solid);       // проём
+    R(0, 2.5, -3, 0, 0, 33, pink); R(0, 2.5, along, along + 3, 0, 33, pink); R(0, 2.5, -3, along + 3, 30, 33, pink);
+    R(2, 18, -10, along + 10, 36, 38, cyan);                    // козырёк
+    for (let k = 1; k < 5; k++) R(1.6, 2, (along * k) / 5 - 0.5, (along * k) / 5 + 0.5, 2, 29, dim); // ламели ворот
+    const c = cyan;
+    glow.box(b.x, h, b.y, b.x + b.w, h + 2, b.y + 1.5, c, c, null, true); glow.box(b.x, h, b.y + b.h - 1.5, b.x + b.w, h + 2, b.y + b.h, c, c, null, true);
+    glow.box(b.x, h, b.y, b.x + 1.5, h + 2, b.y + b.h, c, c, null, true); glow.box(b.x + b.w - 1.5, h, b.y, b.x + b.w, h + 2, b.y + b.h, c, c, null, true);
   }
 
   // Киберпанк-фасад: неоновые пояса, вертикальные вывески, голограммы, шпили с огнями
@@ -1141,8 +1189,16 @@ export function createVoxel(cv) {
       }
       m.position.set(c.x, c.z || 0, c.y);
       m.rotation.set(0, -c.a, c.pitch || 0);
+      // за туманом машину не рисуем
+      m.visible = Math.abs(c.x - camera.position.x) + Math.abs(c.y - camera.position.z) < 3000;
+      if (!m.visible) { seen.add(c); continue; }
       const tm = c.brake ? glowMat('red', 3) : glowMat('red', 1);
       for (const t of m.userData.tail) t.material = tm;
+      if (c.hazard) { // аварийка
+        const on = Math.sin(st.time * 7) > 0, hm = on ? glowMat('orange', 3) : glowMat('red', 0.4);
+        for (const t of m.userData.tail) t.material = hm;
+        for (const t of m.userData.heads) t.material = on ? glowMat('orange', 3) : glowMat('white', 0.6);
+      }
       if (m.userData.bar) {
         const on = !c.wreck && Math.sin(st.time * 14 + (c.cop ? 1 : 0)) > 0;
         m.userData.bar[0].visible = on; m.userData.bar[1].visible = !on && !c.wreck;
@@ -1157,7 +1213,7 @@ export function createVoxel(cv) {
     if (!playerModel || playerGen !== P.gen || playerCol !== P.color) {
       if (playerModel) scene.remove(playerModel);
       playerCol = P.color;
-      playerModel = carModel('sport', P.color || '#d8262a', true); scene.add(playerModel); playerGen = P.gen;
+      playerModel = carModel('delorean', P.color || '#c8ccd4', true); scene.add(playerModel); playerGen = P.gen;
     }
     // выхлоп нитро
     if (P.boosting) for (const s of [-1, 1]) {
@@ -1310,8 +1366,13 @@ export function createVoxel(cv) {
       for (const o of Object.values(m)) o.material.color.copy(c);
       const pulse = 1 + Math.sin(st.time * 5) * 0.06;
       if (mk.kind === 'beam' || mk.kind === 'shop') {
-        m.beam.visible = m.ring.visible = true;
-        m.beam.position.set(mk.x, 0, mk.y); m.beam.scale.set(mk.r * 0.75, 420, mk.r * 0.75);
+        // столб света бледный и гаснет вблизи, чтобы не закрывать обзор; у мастерской — только кольцо
+        const d = Math.hypot(mk.x - st.player.x, mk.y - st.player.y);
+        m.beam.visible = mk.kind === 'beam' && d > 160;
+        m.beam.material.opacity = 0.075 * Math.min(1, (d - 160) / 600);
+        m.ring.visible = true;
+        m.ring.material.opacity = mk.kind === 'shop' ? 0.55 : 0.7;
+        m.beam.position.set(mk.x, 0, mk.y); m.beam.scale.set(mk.r * 0.45, 260, mk.r * 0.45);
         m.ring.position.set(mk.x, 1.5, mk.y); m.ring.scale.set(mk.r * pulse, 1, mk.r * pulse);
       } else if (mk.kind === 'pickup') {
         m.pick.visible = m.ring.visible = true;
@@ -1475,7 +1536,7 @@ export function createVoxel(cv) {
     const add = { transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false };
     const c = new THREE.Color(h.col);
     const beam = new THREE.Mesh(new THREE.CylinderGeometry(34, 34, 4000, 16, 1, true),
-      new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(1.4), opacity: 0.16, fog: false, ...add }));
+      new THREE.MeshBasicMaterial({ color: c.clone().multiplyScalar(1.2), opacity: 0.07, fog: false, ...add }));
     beam.position.set(h.x, 2000, h.y);
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(440, 110), new THREE.MeshBasicMaterial({ map: gangTex(h.name, h.col), opacity: 0.95, fog: false, ...add }));
     sign.position.set(h.x, 460, h.y);
@@ -1500,7 +1561,8 @@ export function createVoxel(cv) {
       const d = Math.hypot(h.x - P.x, h.y - P.y);
       const show = !h.state.dead && (h.state.intel >= 3 || d < 1600);
       if (!v) { if (!show && d > 2600) continue; v = buildHQ(h); hqVis.set(h, v); }
-      v.beam.visible = v.sign.visible = show;
+      v.sign.visible = show;
+      v.beam.visible = show && d > 900; // вблизи столб не мешает смотреть на реакторы
       // голограмма поворачивается к камере
       v.sign.rotation.y = Math.atan2(camera.position.x - h.x, camera.position.z - h.y);
       v.sign.material.opacity = 0.85 + Math.sin(st.time * 19 + h.k) * 0.08;

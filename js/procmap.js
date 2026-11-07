@@ -41,7 +41,7 @@ export const procMap = {
       const a = Math.random() * Math.PI * 2, d = dmin + Math.random() * (dmax - dmin);
       const i = W.colAt(x + Math.cos(a) * d), j = W.rowAt(y + Math.sin(a) * d);
       if (!W.vSegExists(i, j)) continue;
-      const px = W.roadX(i) + 21, py = W.roadY(j) + (W.roadY(j + 1) - W.roadY(j)) * (0.25 + Math.random() * 0.5);
+      const px = W.roadX(i) + W.laneOff(W.aveX(i), 0), py = W.roadY(j) + (W.roadY(j + 1) - W.roadY(j)) * (0.25 + Math.random() * 0.5);
       if (!W.isWater(px, py)) return [px, py, Math.atan2(y - py, x - px)];
     }
     return null;
@@ -55,16 +55,16 @@ export const procMap = {
       const i = W.colAt(px), j = W.rowAt(py);
       if (vert ? !W.aveX(i) || !W.vSegExists(i, j) : !W.aveY(j) || !W.hSegExists(i, j)) continue;
       const side = Math.random() < 0.5 ? 1 : -1;
-      const hw = 17, hl = 130;
+      const hw = W.LANE_W(true) / 2, hl = 130, lo = W.laneOff(true, W.laneCount(true) - 1);
       let cx, cy, ux, uy;
       if (vert) {
         const y0 = W.roadY(j) + W.widthY(j) / 2, y1 = W.roadY(j + 1) - W.widthY(j + 1) / 2;
         if (y1 - y0 < 2 * hl + 160) continue;
-        cx = W.roadX(i) + side * 54; cy = (y0 + y1) / 2; ux = 0; uy = 1;
+        cx = W.roadX(i) + side * lo; cy = (y0 + y1) / 2; ux = 0; uy = 1;
       } else {
         const x0 = W.roadX(i) + W.widthX(i) / 2, x1 = W.roadX(i + 1) - W.widthX(i + 1) / 2;
         if (x1 - x0 < 2 * hl + 160) continue;
-        cx = (x0 + x1) / 2; cy = W.roadY(j) + side * 54; ux = 1; uy = 0;
+        cx = (x0 + x1) / 2; cy = W.roadY(j) + side * lo; ux = 1; uy = 0;
       }
       const bx0 = cx - ux * hl - 60, bx1 = cx + ux * hl + 60, by0 = cy - uy * hl - 60, by1 = cy + uy * hl + 60;
       if (W.diagsInRect(bx0, by0, bx1, by1, 80).length) continue;

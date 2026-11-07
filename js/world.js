@@ -2,10 +2,10 @@
 // и наполнение кварталов. Всё вычисляется детерминированно из координат.
 import { hash, hashU, rng, noise1, noise2, fbm2, clamp, lerp } from './util.js';
 
-export const G = 760;          // средний шаг сетки улиц
+export const G = 1050;         // средний шаг сетки улиц
 export const SW = 18;          // ширина тротуара
-export const ROAD_W = 84;
-export const AVE_W = 140;
+export const ROAD_W = 116;
+export const AVE_W = 190;
 export const DIAG_W = 100;
 export const RAIL_W = 62;
 export const RP = 5200;        // период полос, в которых может течь река
@@ -26,6 +26,10 @@ export const aveX = (i) => hash(i, 1, 102) < 0.22;
 export const aveY = (j) => hash(j, 2, 102) < 0.22;
 export const widthX = (i) => (aveX(i) ? AVE_W : ROAD_W);
 export const widthY = (j) => (aveY(j) ? AVE_W : ROAD_W);
+// полосы в одну сторону: на улице две, на проспекте три; смещение центра полосы от оси дороги
+export const laneCount = (ave) => (ave ? 3 : 2);
+export const LANE_W = (ave) => (ave ? 28 : 25);
+export const laneOff = (ave, lane) => (ave ? 6 : 4) + LANE_W(ave) * (lane + 0.5);
 
 export function colAt(x) {
   let i = Math.floor(x / G);
@@ -280,11 +284,62 @@ function genBlock(i, j) {
   B.type = type;
   B.dens = z.dens;
 
+  planTune(B);
   LAYOUT[type](B, r, z.dens);
   if (B.rail !== null) railFences(B);
   streetLamps(B, r);
+  finishTune(B, r);
   B.ped = { x0: bx0 + 8, y0: by0 + 8, x1: bx1 - 8, y1: by1 - 8 };
   return B;
+}
+
+// ---------------------------------------------------------------- мастерская «Неон-тюн»
+// Низкий бокс с неоновыми воротами в глубине квартала, перед ним — заездная площадка с тротуара.
+// Место резервируется до раскладки квартала, чтобы туда не встали дома и деревья.
+const TUNE_TYPES = new Set(['towers', 'mixed', 'perimeter', 'micro', 'industrial']);
+const TUNE_APRON = 120, TUNE_DEPTH = 90, TUNE_SPAN = 180;
+function planTune(B) {
+  if (hash(B.i, B.j, 505) > 0.11 || !TUNE_TYPES.has(B.type) || B.diags.length || B.rail !== null || B.river) return;
+  const sides = [];
+  if (vSegExists(B.i, B.j) && B.x0 > roadX(B.i)) sides.push([1, 0]);
+  if (vSegExists(B.i + 1, B.j)) sides.push([-1, 0]);
+  if (hSegExists(B.i, B.j) && B.y0 > roadY(B.j)) sides.push([0, 1]);
+  if (hSegExists(B.i, B.j + 1)) sides.push([0, -1]);
+  if (!sides.length) return;
+  const [nx, ny] = sides[Math.min(sides.length - 1, (hash(B.i, B.j, 506) * sides.length) | 0)];
+  // (u, v): u — вглубь квартала от кромки тротуара, v — вдоль улицы от середины
+  const ox = nx > 0 ? B.x0 : nx < 0 ? B.x1 : B.cx, oy = ny > 0 ? B.y0 : ny < 0 ? B.y1 : B.cy;
+  const rect = (u0, u1, v0, v1) => {
+    const ax = ox + nx * u0 - ny * v0, ay = oy + ny * u0 + nx * v0, bx = ox + nx * u1 - ny * v1, by = oy + ny * u1 + nx * v1;
+    return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
+  };
+  const u1 = SW + TUNE_APRON, u2 = u1 + TUNE_DEPTH, hv = TUNE_SPAN / 2;
+  B.res = rect(0, u2 + 12, -hv - 20, hv + 20);
+  keep(B, B.res.x, B.res.y, B.res.w, B.res.h);
+  B.tune = {
+    nx, ny, x: ox + nx * (SW + TUNE_APRON * 0.5), y: oy + ny * (SW + TUNE_APRON * 0.5),
+    apron: rect(SW, u1, -hv, hv), bld: rect(u1, u2, -hv, hv), door: rect(u1 - 2, u1 + 2, -hv * 0.55, hv * 0.55),
+  };
+}
+function finishTune(B, r) {
+  const T = B.tune;
+  if (!T) return;
+  const R = B.res;
+  B.res = null;
+  const inR = (x, y) => x > R.x && x < R.x + R.w && y > R.y && y < R.y + R.h;
+  if (hitsSolid(B, R.x, R.y, R.w, R.h) || B.circles.some((c) => inR(c.x, c.y)) || !rectClear(B, R.x, R.y, R.w, R.h, 0, false)) { B.tune = null; return; }
+  B.parked = B.parked.filter((p) => !inR(p.x, p.y));
+  B.lamps = B.lamps.filter((l) => !inR(l.x, l.y));
+  B.props = B.props.filter((p) => !inR(p.x, p.y));
+  const A = T.apron;
+  op(B, { t: 'r', x: A.x, y: A.y, w: A.w, h: A.h, c: '#2b2533' });
+  for (let k = 0; k < 2; k++) { // жёлто-чёрная разметка у ворот
+    const D = T.door, w = Math.max(D.w, 4), h = Math.max(D.h, 4);
+    op(B, { t: 'r', x: D.x - T.nx * (10 + k * 8), y: D.y - T.ny * (10 + k * 8), w, h, c: k ? '#d8b020' : '#ff3fc8' });
+  }
+  const bld = addBuilding(B, r, T.bld.x, T.bld.y, T.bld.w, T.bld.h, 46, 'tune', { margin: 0 });
+  if (!bld) { B.tune = null; return; }
+  bld.tune = T;
 }
 
 // ---------------------------------------------------------------- проверки размещения
@@ -333,6 +388,7 @@ const op = (B, o) => B.ground.push(o);
 
 function addBuilding(B, r, x, y, w, h, height, style, o = {}) {
   if (w < 8 || h < 8) return null;
+  if (B.res && x < B.res.x + B.res.w && x + w > B.res.x && y < B.res.y + B.res.h && y + h > B.res.y) return null;
   if (!rectClear(B, x, y, w, h, o.margin ?? 4)) return null;
   if (o.noOverlap && hitsSolid(B, x, y, w, h, 2)) return null;
   if (GIGA[style]) height *= GIGA[style](r, B.dens || 0.5);
@@ -478,6 +534,7 @@ const STYLE = {
     const long = b.w > b.h;
     for (let s = 6; s < (long ? b.w : b.h) - 3; s += 6) b.details.push(long ? { t: 'r', x: b.x + s, y: b.y + 1, w: 1, h: b.h - 2, c: 'rgba(0,0,0,0.25)' } : { t: 'r', x: b.x + 1, y: b.y + s, w: b.w - 2, h: 1, c: 'rgba(0,0,0,0.25)' });
   },
+  tune(b) { b.roof = '#24202c'; b.wall = '#1a1622'; b.lit = 0; b.floorH = b.height; },
   cabin(b, r) { b.roof = r.pick(['#2f5a8a', '#3a6a9a', '#8a8a8a']); b.wall = '#1a2030'; b.lit = 0.5; b.floorH = b.height; },
   canopy(b) { b.roof = '#d0d0cc'; b.wall = '#30302e'; b.lit = 0; b.floorH = b.height;
     b.details.push({ t: 'rs', x: b.x + 2, y: b.y + 2, w: b.w - 4, h: b.h - 4, c: '#e8402a', lw: 4 });
@@ -945,7 +1002,6 @@ function plaza(B, r, P) {
     op(B, { t: 'c', x: cx, y: cy, r: fr + 6, c: '#9a948a' });
     op(B, { t: 'c', x: cx, y: cy, r: fr, c: '#2a8aa8' });
     op(B, { t: 'c', x: cx, y: cy, r: fr * 0.3, c: '#cfeaf2' });
-    B.circles.push({ x: cx, y: cy, r: fr + 6, z1: 10 });
     addLamp(B, cx, cy, cx, cy, fr * 2.6, 'cyan', 0.6, false);
     keep(B, cx - fr - 10, cy - fr - 10, fr * 2 + 20, fr * 2 + 20);
   }
@@ -1126,7 +1182,6 @@ function parkIn(B, r, P, big) {
     op(B, { t: 'c', x: cx, y: cy, r: 14, c: '#9a948a' });
     op(B, { t: 'c', x: cx, y: cy, r: 10, c: '#2a8aa8' });
     addLamp(B, cx, cy, cx, cy, 60, 'cyan', 0.8, false);
-    B.circles.push({ x: cx, y: cy, r: 14, z1: 10 });
   }
   B.paths = (B.paths || []).concat(pathPts);
   const count = Math.floor((P.w * P.h) / 3600);

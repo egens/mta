@@ -5,6 +5,7 @@ import { clamp } from './util.js';
 import { MAP } from './map.js';
 
 export const MAX_SPEED = 580;
+const BASE_VMAX = 0.68;          // доля MAX_SPEED у машины без тюнинга
 const W_SINK = 24; // глубже — машина в воде
 const GRAVITY = 720;
 const CAR_H = 18;
@@ -55,8 +56,9 @@ export function updatePlayer(P, inp, dt, st) {
     P.x += P.vx * dt; P.y += P.vy * dt;
   } else {
     // повреждения: меньше мощность и максималка, машину уводит в сторону помятого бока
-    let perf = (0.5 + 0.5 * (P.hp / 100)) * (P.power || 1);
-    let vmax = MAX_SPEED * (0.55 + 0.45 * (P.hp / 100)) * (P.power || 1);
+    // стоковая машина заметно медленнее: до прежней максималки её доводит тюнинг двигателя
+    let perf = (0.5 + 0.5 * (P.hp / 100)) * (P.power || 1) * 0.72;
+    let vmax = MAX_SPEED * BASE_VMAX * (0.55 + 0.45 * (P.hp / 100)) * (P.power || 1);
     // нитро: рывок, пока есть баллон; баллон заправляется сам
     P.boosting = !!(P.nitro && inp.boost && inp.up && P.nitroT > 0);
     if (P.boosting) { perf *= 2.2; vmax *= 1.3; P.nitroT -= dt; }

@@ -200,10 +200,12 @@ function segMarks(g, R, vert, i, j) {
     F(-6, a + 34, 12, b - a - 68);
     g.fillStyle = PAL.mark;
     F(-7.5, a + 34, 1.5, b - a - 68); F(6, a + 34, 1.5, b - a - 68);
-    for (let v = a + 34; v < b - 54; v += 40) if (v > lo && v < hi) { F(-39, v, 2, 20); F(37, v, 2, 20); }
+    for (const o of [34, 62]) for (let v = a + 34; v < b - 54; v += 40) if (v > lo && v < hi) { F(-o - 1, v, 2, 20); F(o - 1, v, 2, 20); }
   } else {
+    g.fillStyle = '#d8b84a';
+    F(-2.5, a + 30, 1.5, b - a - 60); F(1, a + 30, 1.5, b - a - 60);
     g.fillStyle = PAL.mark;
-    for (let v = a + 30; v < b - 50; v += 40) if (v > lo && v < hi) F(-1, v, 2, 20);
+    for (let v = a + 30; v < b - 50; v += 40) if (v > lo && v < hi) { F(-30, v, 2, 20); F(28, v, 2, 20); }
   }
   g.fillStyle = 'rgba(225,225,215,0.85)';
   for (let u = -w / 2 + 5; u < w / 2 - 8; u += 11) { F(u, a + 4, 6, 18); F(u, b - 22, 6, 18); }

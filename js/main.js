@@ -107,10 +107,10 @@ const st = {
 // ---------------------------------------------------------------- старт на дороге
 function roadSpot(i0, j0) {
   for (let r = 0; r < 12; r++) for (let i = i0 - r; i <= i0 + r; i++) for (let j = j0 - r; j <= j0 + r; j++) {
-    const x = W.roadX(i) - 21, y = (W.roadY(j) + W.roadY(j + 1)) / 2;
+    const x = W.roadX(i) - W.laneOff(W.aveX(i), 1), y = (W.roadY(j) + W.roadY(j + 1)) / 2;
     if (W.vSegExists(i, j) && !W.isWater(x, y)) return [x, y];
   }
-  return [W.roadX(i0) - 21, W.roadY(j0) + 300];
+  return [W.roadX(i0) - W.laneOff(W.aveX(i0), 1), W.roadY(j0) + 300];
 }
 const [sx, sy] = roadSpot(0, 0);
 st.player = createPlayer(sx, sy, Math.PI / 2);
